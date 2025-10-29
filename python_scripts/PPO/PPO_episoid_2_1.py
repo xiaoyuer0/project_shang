@@ -204,7 +204,7 @@ def PPO_tai_episoid(ppo2_LegUpper=None, ppo2_LegLower=None, ppo2_Ankle=None, exi
             print("等待稳定...")
             for _ in range(50):  # 增加50个时间步的稳定时间
                 env.robot.step(env.timestep)
-    
+            # 关键改动，等待完全复位再进行下一周期
             # 检查传感器是否稳定
             print("检查传感器状态...")
             max_retries = 100  # 最大重试次数，避免无限循环
