@@ -202,14 +202,13 @@ def PPO_tai_episoid(ppo2_LegUpper=None, ppo2_LegLower=None, ppo2_Ankle=None, exi
             env.darwin.robot_reset()  # 重置环境
             # 增加稳定时间
             print("等待稳定...")
-            for _ in range(50):  # 增加50个时间步的稳定时间
+            for _ in range(40):  # 增加50个时间步的稳定时间
                 env.robot.step(env.timestep)
             # 关键改动，等待完全复位再进行下一周期
             # 检查传感器是否稳定
             print("检查传感器状态...")
-            max_retries = 100  # 最大重试次数，避免无限循环
+            max_retries = 40  # 最大重试次数，避免无限循环
             retry_count = 0
-            
             while retry_count < max_retries:
                 all_stable = True
                 acc = env.darwin.accelerometer.getValues()
@@ -235,8 +234,11 @@ def PPO_tai_episoid(ppo2_LegUpper=None, ppo2_LegLower=None, ppo2_Ankle=None, exi
                 env.robot.step(env.timestep)  # 单步执行仿真，让机器人有更多时间稳定
             
             if not all_stable:
-                print(f"警告: 达到最大重试次数({max_retries})，传感器可能未完全稳定，继续执行...")
+                print(f"警告: 达到最大重试次数({max_retries})，可能被卡住，继续执行...")
                 env.reset()
+                env.wait(500)
+                env.reset()
+
 
             
             print("等待一秒...")
