@@ -248,6 +248,8 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
 
 
     episode_num = episode_start  # 初始化回合计数器
+    #rpm = ReplayMemory(100000)  # 创建经验回放缓存
+    #rpm_2 = ReplayMemory_2(100000)
     env = Environment()
     success_catch = 0                  # 抓取成功次数
     
@@ -262,16 +264,26 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
         steps = 0  # 初始化步数
         return_all = 0  # 初始化总奖励
         obs_img, obs_tensor = env.get_img(steps, imgs)  # 获取初始图像和图像张量
+        # log_writer.add(obs_img=obs_img, steps=steps)
         robot_state = env.get_robot_state()  # 获取机器人状态
+        # print(f'robot_state: {robot_state}')
+        # print(f'robot_state_len: {len(robot_state)}')
         print("____________________")  # 打印初始状态
         prev_distance = None
         while True:
+            # print(f'第{episode_num}周期，第{steps}步')
+            # 安全检查：确保robot_state有足够的元素
             if len(robot_state) < 6:
                 print(f"警告：robot_state长度不足 ({len(robot_state)} < 6)，跳过此步")
                 continue
             ppo_state = [robot_state[1], robot_state[0], robot_state[5], robot_state[4]]  # 将机器人状态转换为ppo状态
             # log_writer.add(ppo_state=ppo_state, steps=steps)
             obs = (obs_tensor, robot_state)
+            # log_writer.add(obs=obs, steps=steps)
+            # 将机器人状态转换为张量
+            # x_graph = torch.tensor(robot_state, dtype=torch.float32).to(device)
+            # x_graph = torch.tensor(robot_state, dtype=torch.float32).unsqueeze(1).to(device)  # 添加维度
+            # 输入次数、状态，选择动作
             actions_combined, log_prob_combined, value_combined = ppo_catch.choose_action(episode_num=i, obs=obs, x_graph=robot_state, action_type='shoulder') # action_type参数已废弃，可忽略
     
             # --- 【修正】分离出两个动作 ---
@@ -328,55 +340,29 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
             # === 新高密度距离奖励 ===
                        # === 新高密度距离奖励 ===
                         # === 新高密度距离奖励 ===
-            step_penalty = -0.1
-            return_all += step_penalty
-
-            # 3. 获取当前GPS信息并计算到目标的距离
             gps1, _, _, _, _ = env.print_gps()
             # 安全检查：确保gps1有足够的元素
             if len(gps1) < 3:
-                print(f"警告：gps1长度不足 ({len(gps1)} < 3)，无法计算距离，给予惩罚")
-                # 如果无法获取位置信息，可以认为是迷路或者感知失败，给予较大惩罚
-                return_all += -5.0 # 或者直接判断为失败
+                print(f"警告：gps1长度不足 ({len(gps1)} < 3)，使用默认值")
+                dx = 0.0
+                dy = 0.0
             else:
                 dx = gps_goal[0] - gps1[1]
                 dy = gps_goal[1] - gps1[2]
-                current_distance = (dx**2 + dy**2)**0.5
+            current_distance = (dx**2 + dy**2)**0.5
 
-            # --- 靠近奖励和成功判定 ---
-
-            # 4. 给出靠近的奖励，但要小于每步的惩罚，防止恶意刷分
-            # 我们设定一个有效距离奖励的阈值，例如 0.5 米。
-            # 当智能体在这个范围内移动时，给予一个正值奖励，但这个奖励的总和必须小于步数惩罚的总和。
-            # 例如，每步靠近奖励为 0.08，那么需要连续有效移动 1.25 步（0.1 / 0.08）才能抵消一步的惩罚。
-            # 这能让智能体在“原地踏步”和“努力靠近”之间做出权衡，确保最终是朝着目标前进的。
-            proximity_threshold = 0.5  # 接近目标的阈值
-            if prev_distance is not None and current_distance < proximity_threshold:
-                # 靠近时给予一个较小的正奖励
-                proximity_reward = 0.08
-                return_all += proximity_reward
-
-            # 2. 成功时奖励 50
+            # 距离变化奖励（鼓励靠近目标）
             success_flag1 = env.darwin.get_touch_sensor_value('grasp_L1_2')
-            if success_flag1 == 1:
-                success_reward = 50.0
-                return_all += success_reward
-                print(f"成功抓取！获得 {success_reward} 的奖励。")
+            if prev_distance is not None:
+                reward = (prev_distance - current_distance) * 10.0  # 放大系数可调
             else:
-                # 成功判定逻辑结束，可以进行失败判定
-                pass
+                reward = -current_distance  # 初始奖励
 
-            # 更新上一步的距离，用于下一次循环计算
-            prev_distance = current_distance
+            prev_distance = current_distance  # 更新
 
-            # --- 失败判定（超时）---
-            # 2. 失败超时时惩罚 20
-            if steps > 19:
-                timeout_penalty = -20.0
-                return_all += timeout_penalty
-                print(f"达到最大步数 {19}！任务失败，给予 {timeout_penalty} 的惩罚。")
-                # 您可能在这里需要设置一个 done 标志，用于结束回合
-                # is_done = True奖励
+            # 稀疏奖励：到达目标附近额外加分
+            if success_flag1 == 1:
+                reward += 10.0
             
             return_all = return_all + reward  # 总奖励为当前奖励加上之前的总奖励
             steps += 1  # 步数加1
@@ -525,9 +511,9 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
                             action_shoulder_t = actions_combined[0] 
                             action_arm_t = actions_combined[1]
                             
-                            # 限制动作幅度，使测试更加稳定（放宽限制）
-                            action_shoulder_t = np.clip(action_shoulder_t, -0.8, 0.8)  # 放宽到[-0.8, 0.8]
-                            action_arm_t = np.clip(action_arm_t, -0.8, 0.8)  # 放宽到[-0.8, 0.8]
+                            # 限制动作幅度，使测试更加稳定
+                            action_shoulder_t = np.clip(action_shoulder_t, -0.5, 0.5)  # 限制在[-0.5, 0.5]范围内
+                            action_arm_t = np.clip(action_arm_t, -0.5, 0.5)  # 限制在[-0.5, 0.5]范围内
                             
                             # 执行动作
                             test_gps1, test_gps2, test_gps3, test_gps4, test_foot_gps1 = env.print_gps()
