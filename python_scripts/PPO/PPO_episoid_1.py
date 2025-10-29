@@ -13,23 +13,17 @@ from python_scripts.PPO.Replay_memory_2 import ReplayMemory_2
 from python_scripts.PPO.PPO_episoid_2_1 import PPO_tai_episoid
 from python_scripts.Webots_interfaces import Environment
 # from Data_fusion import data_fusion
-from python_scripts.Project_config import path_list, gps_goal, gps_goal1, device
+from python_scripts.Project_config import path_list, gps_goal, gps_goal1, device, Darwin_config
 from python_scripts.PPO_Log_write import Log_write
 from python_scripts.PPO.RobotRun1 import RobotRun 
-# 在文件顶部 import 部分添加
-
-# --- 新增：模型评估测试函数 ---
-# --- 新增/修改：模型评估测试函数 ---
-
-
-
+from python_scripts.utils.sensor_utils import wait_for_sensors_stable, reset_environment
 
 class ModelRanking:
     """
     一个用于追踪和管理N个最佳模型的辅助类。
     它使用最小堆来高效地找到当前性能最差的模型。
     """
-    def __init__(self, top_n=5, key_name='success_rate'): # --- 修改：默认评分标准为成功率 ---
+    def __init__(self, top_n=5, key_name='success_rate'): 
         self.top_n = top_n
         self.rankings = []
         self.key_name = key_name
@@ -248,8 +242,6 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
 
 
     episode_num = episode_start  # 初始化回合计数器
-    #rpm = ReplayMemory(100000)  # 创建经验回放缓存
-    #rpm_2 = ReplayMemory_2(100000)
     env = Environment()
     success_catch = 0                  # 抓取成功次数
     
@@ -259,19 +251,19 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
         print(f"<<<<<<<<<第{i}周期") # 打印当前周期
         success_flag1 = 0
         env.reset()
-        env.wait(500)   # 等待500ms
+        env.wait(500)                         
+        # 使用工具函数检查传感器状态
+        if not wait_for_sensors_stable(env, max_retries=40, wait_ms=200):
+            print("警告: 传感器不稳定，尝试重置环境...")
+            reset_environment(env)
         imgs = []  # 初始化图像列表
         steps = 0  # 初始化步数
         return_all = 0  # 初始化总奖励
         obs_img, obs_tensor = env.get_img(steps, imgs)  # 获取初始图像和图像张量
-        # log_writer.add(obs_img=obs_img, steps=steps)
         robot_state = env.get_robot_state()  # 获取机器人状态
-        # print(f'robot_state: {robot_state}')
-        # print(f'robot_state_len: {len(robot_state)}')
         print("____________________")  # 打印初始状态
         prev_distance = None
         while True:
-            # print(f'第{episode_num}周期，第{steps}步')
             # 安全检查：确保robot_state有足够的元素
             if len(robot_state) < 6:
                 print(f"警告：robot_state长度不足 ({len(robot_state)} < 6)，跳过此步")
@@ -286,25 +278,12 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
             # 输入次数、状态，选择动作
             actions_combined, log_prob_combined, value_combined = ppo_catch.choose_action(episode_num=i, obs=obs, x_graph=robot_state, action_type='shoulder') # action_type参数已废弃，可忽略
     
-            # --- 【修正】分离出两个动作 ---
+            # --- 分离出两个动作 ---
             # 现在的结果是一个2元素的 numpy 数组
             action_shoulder = actions_combined[0] 
             action_arm = actions_combined[1]
             print(f'第{i}周期，第{steps}步，肩膀动作: {action_shoulder.item():.4f}，手臂动作: {action_arm.item():.4f}')
             
-            # # 简化动作处理逻辑
-            # if isinstance(a, tuple):
-            #     # 如果是元组，取第一个元素作为动作
-            #     action_value = a[0]
-            # else:
-            #     # 否则直接使用a
-            #     action_value = a
-            # # 确保action_value是标量
-            # if hasattr(action_value, 'cpu'):
-            #     action_value = action_value.cpu()
-            # if hasattr(action_value, 'item'):
-            #     action_value = action_value.item()
-                
             gps1, gps2, gps3, gps4, foot_gps1 = env.print_gps()  # 获取GPS位置
             if steps >= 19:  # 如果步数大于等于19
                 catch_flag = 1.0  # 抓取器状态为1.0
@@ -368,32 +347,7 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
             steps += 1  # 步数加1
             next_obs_img, next_obs_tensor = env.get_img(steps, imgs)  # 获取下一个图像和图像张量
             next_obs = [next_obs_img, next_state]
-            # print('获取下一个状态更新完毕')
-            # 记录所有步，避免采样偏置（PPO 需要 on-policy 全覆盖）
-            # ppo_shoulder.store_transition_catch(
-            #     state=[obs_img, robot_state, robot_state],
-            #     action_shoulder=action_shoulder,
-            #     action_arm=action_arm,
-            #     reward=reward,
-            #     next_state=[next_obs_img, next_state, next_state],
-            #     done=done,
-            #     value_shoulder=value_shoulder,
-            #     value_arm=value_arm,
-            #     log_prob_shoulder=log_prob_shoulder,
-            #     log_prob_arm=log_prob_arm
-            # )
-            # ppo_arm.store_transition_catch(
-            #     state=[obs_img, robot_state, robot_state],
-            #     action_shoulder=action_shoulder,
-            #     action_arm=action_arm,
-            #     reward=reward,
-            #     next_state=[next_obs_img, next_state, next_state],
-            #     done=done,
-            #     value_shoulder=value_shoulder,
-            #     value_arm=value_arm,
-            #     log_prob_shoulder=log_prob_shoulder,
-            #     log_prob_arm=log_prob_arm
-            # )
+
             ppo_catch.store_transition_catch(
                 state=[obs_img, robot_state, robot_state],
                 action_shoulder=action_shoulder,
@@ -411,50 +365,7 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
 
 
             obs_tensor = next_obs_tensor  # 更新图像张量
-            #if temp < 5000:  # 如果经验回放缓存小于3000
-                #episode_num = 0  # 计数器为0
-            # if i >= 0 and done == 1:  # 只有在buffer中存满了数据才会学习
-            #     if goal == 1:  # 如果达到目标
-            #         print("goal = 1")
-            #         save_path = path_list['model_path_catch_PPO'] + '/ppo_model_%s.ckpt' % i  # 保存模型
-            #         checkpoint = {
-            #             'policy_shoulder': ppo_shoulder.policy.state_dict(),
-            #             'optimizer_shoulder': ppo_shoulder.optimizer.state_dict(),
-            #             'policy_arm': ppo_arm.policy.state_dict(),
-            #             'optimizer_arm': ppo_arm.optimizer.state_dict(),
-            #             'episode': i
-            #         }
-            #         torch.save(checkpoint, save_path)
-            #     #print("11111111111111111111111111111111111111111-303")
-            #     loss_shoulder = ppo_shoulder.learn(action_type='shoulder')
-            #     #print("22222222222222222222222222222222222222222-305")
-            #     loss_arm = ppo_arm.learn(action_type='arm')
-            #     loss = loss_shoulder + loss_arm   
-            #     print('loss_arm:', loss_arm)
-            #     print('loss_shoulder:', loss_shoulder)
-            #     print('loss:', loss)
-            #     log_writer_catch.add(loss=loss)
-               
-            #     if i % 500 == 0 and i != 0:  # 每100步保存一次模型
-            #         save_path = path_list['model_path_catch_PPO'] + '/ppo_model_%s.ckpt' % i  # 保存模型
-            #         checkpoint = {
-            #             'policy_shoulder': ppo_shoulder.policy.state_dict(),
-            #             'optimizer_shoulder': ppo_shoulder.optimizer.state_dict(),
-            #             'policy_arm': ppo_arm.policy.state_dict(),
-            #             'optimizer_arm': ppo_arm.optimizer.state_dict(),
-            #             'episode': i
-            #         }
-            #     torch.save(checkpoint, save_path)
-            #     model_ranking.add_and_manage(new_score=return_all, new_path=save_path, episode_id=i)
-
-            #      # 每次处理完保存后，打印当前排行榜
-            #     model_ranking.print_current_rankings()
-
-            #     log_writer_catch.add(return_all=return_all)
-            #     # 写入目标
-            #     log_writer_catch.add(goal=goal)
-                        # --- 新的Episode结束处理逻辑 ---
-            # 这个块在 while True: 循环结束时执行
+            
             if done == 1 or steps >= max_steps_per_episode:
                 # 1. 调用learn()进行模型更新
                 print("\n--- Episode 结束，开始学习 ---")
@@ -471,8 +382,8 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
                 }
 
                  # --- 【逻辑决策点】决定何时进行模型评估 ---
-                is_checkpoint_interval = (i % CHECKPOINT_INTERVAL == 0) and (i != 0)
-                
+                #is_checkpoint_interval = (i % CHECKPOINT_INTERVAL == 0) and (i != 0)
+                is_checkpoint_interval = i % CHECKPOINT_INTERVAL == 0
                 # 我们使用 "是否到达检查点" 作为触发模型评估的唯一条件
                 if is_checkpoint_interval:
                     print(f"\n--- 周期 {i}: 到达检查点，开始在当前环境进行模型测试 (共 {NUM_TEST_EPISODES} 轮) ---")
@@ -483,15 +394,19 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
                     
                     # 定义测试的最大步数
                     max_steps_per_test_episode = 500
-
-                    for test_ep in range(NUM_TEST_EPISODES):
-                        print(f"  测试轮次 {test_ep + 1}/{NUM_TEST_EPISODES}...", end='\r')
+                    for test_ep in range(NUM_TEST_EPISODES):                    
+                        print(f"————————————————测试轮次 {test_ep+ 1}/{NUM_TEST_EPISODES}——————————————")
                         env.reset()
-                        env.wait(200)  # 增加等待时间，使环境更稳定 
+                        env.wait(200)  # 增加等待时间，使环境更稳定                        
+                        # 使用工具函数检查传感器状态
+                        if not wait_for_sensors_stable(env, max_retries=40, wait_ms=200):
+                            print("警告: 传感器不稳定，尝试重置环境...")
+                            reset_environment(env)
+
                         
-                        test_steps = 0
                         test_imgs = []  # 初始化测试图像列表
                         while True:
+                            test_steps = 0
                             # 获取状态
                             test_obs_img, test_obs_tensor = env.get_img(test_steps, test_imgs)
                             test_robot_state = env.get_robot_state()
@@ -503,11 +418,11 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
                                 
                             test_obs = (test_obs_tensor, test_robot_state)
                             
-                            # --- 【修正】只调用一次 choose_action ---
+                            # --- 只调用一次 choose_action ---
                             with torch.no_grad(): 
                                 actions_combined, _, _ = ppo_catch.choose_action(episode_num=i, obs=test_obs, x_graph=test_robot_state, action_type='shoulder')
                             
-                            # --- 【修正】分离动作并添加限制 ---
+                            # --- 分离动作并添加限制 ---
                             action_shoulder_t = actions_combined[0] 
                             action_arm_t = actions_combined[1]
                             
@@ -547,19 +462,20 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
                                 # 修复：与训练模块一致，触摸传感器触发就算成功
                                 if test_touch_sensor == 1:
                                     successful_test_episodes += 1
-                                    print(f"  ✓ 测试轮次 {test_ep + 1} 抓取成功！(触摸传感器触发)")
+                                    print(f"  ✓ 测试轮次 {test_ep  + 1} 抓取成功！(触摸传感器触发)")
                                 elif test_goal == 1:
                                     successful_test_episodes += 1
-                                    print(f"  ✓ 测试轮次 {test_ep + 1} 目标达成！")
+                                    print(f"  ✓ 测试轮次 {test_ep  + 1} 目标达成！")
                                 else:
                                     if test_done == 1:
-                                        print(f"  ✗ 测试轮次 {test_ep + 1} 因done=1结束")
+                                        print(f"  ✗ 测试轮次 {test_ep  + 1} 因done=1结束")
                                     elif test_steps >= max_steps_per_test_episode:
-                                        print(f"  ✗ 测试轮次 {test_ep + 1} 达到最大步数")
+                                        print(f"  ✗ 测试轮次 {test_ep  + 1} 达到最大步数")
                                 break
 
                     ppo_catch.policy.train()
                     test_success_rate = (successful_test_episodes / NUM_TEST_EPISODES) * 100
+                    log_writer_catch.add(success_rate=test_success_rate)
                     print(f"\n--- 测试完成：{NUM_TEST_EPISODES}轮测试成功率为 {test_success_rate:.2f}% ---")
                     
                     # --- 【修正】排行榜也使用单一检查点 ---

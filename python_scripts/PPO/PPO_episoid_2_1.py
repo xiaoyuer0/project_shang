@@ -3,6 +3,7 @@ import torch
 from python_scripts.Webots_interfaces import Environment
 from python_scripts.Project_config import path_list, BATCH_SIZE, LR, EPSILON, GAMMA, TARGET_REPLACE_ITER, MEMORY_CAPACITY, device, gps_goal, gps_goal1, Darwin_config
 from python_scripts.PPO.PPO_PPOnet_2 import PPO2 
+from python_scripts.utils.sensor_utils import wait_for_sensors_stable, reset_environment 
 from python_scripts.PPO_Log_write import Log_write
 
 def PPO_tai_episoid(ppo2_LegUpper=None, ppo2_LegLower=None, ppo2_Ankle=None, existing_env=None ,total_episode=0, episode=0, log_writer_tai=None, log_file_latest_tai=None):
@@ -200,47 +201,13 @@ def PPO_tai_episoid(ppo2_LegUpper=None, ppo2_LegLower=None, ppo2_Ankle=None, exi
         if done == 1 or steps > 20:
             print("抬腿回合结束，重置环境...")
             env.darwin.robot_reset()  # 重置环境
-            # 增加稳定时间
+            
+            # 增加初始稳定时间
             print("等待稳定...")
-            for _ in range(40):  # 增加50个时间步的稳定时间
+            for _ in range(40):  # 增加40个时间步的稳定时间
                 env.robot.step(env.timestep)
-            # 关键改动，等待完全复位再进行下一周期
-            # 检查传感器是否稳定
-            print("检查传感器状态...")
-            max_retries = 40  # 最大重试次数，避免无限循环
-            retry_count = 0
-            while retry_count < max_retries:
-                all_stable = True
-                acc = env.darwin.accelerometer.getValues()
-                gyro = env.darwin.gyro.getValues()
                 
-                # 检查所有传感器是否都在正常范围内
-                for i in range(3):
-                    acc_ok = Darwin_config.acc_low[i] < acc[i] < Darwin_config.acc_high[i]
-                    gyro_ok = Darwin_config.gyro_low[i] < gyro[i] < Darwin_config.gyro_high[i]
-                    
-                    if not (acc_ok and gyro_ok):
-                        all_stable = False
-                        print(f"传感器不稳定 - 轴 {i+1}: acc={acc[i]:.2f} (目标: {Darwin_config.acc_low[i]}-{Darwin_config.acc_high[i]}), gyro={gyro[i]:.2f} (目标: {Darwin_config.gyro_low[i]}-{Darwin_config.gyro_high[i]})")
-                        break
-                
-                if all_stable:
-                    print("所有传感器已稳定")
-                    break
-                
-                retry_count += 1
-                print(f"等待传感器稳定... ({retry_count}/{max_retries})")
-                env.wait(200)  # 等待200ms
-                env.robot.step(env.timestep)  # 单步执行仿真，让机器人有更多时间稳定
-            
-            if not all_stable:
-                print(f"警告: 达到最大重试次数({max_retries})，可能被卡住，继续执行...")
-                env.reset()
-                env.wait(500)
-                env.reset()
-
-
-            
+           
             print("等待一秒...")
             env.wait(1000)
             imgs = []
