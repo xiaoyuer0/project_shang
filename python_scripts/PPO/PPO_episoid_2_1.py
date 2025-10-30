@@ -140,7 +140,7 @@ def PPO_tai_episoid(ppo2_LegUpper=None, ppo2_LegLower=None, ppo2_Ankle=None, exi
             done = 1
             
         # 定期保存模型
-        if episode % 200 == 0 and done == 1:
+        if episode % 400 == 0 and done == 1:
             save_path = path_list['model_path_tai_PPO'] + f"/ppo_model_tai_{total_episode}_{episode}.ckpt"
             print(f"保存模型到: {save_path}")
             checkpoint = {
