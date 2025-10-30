@@ -382,8 +382,8 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
                 }
 
                  # --- 【逻辑决策点】决定何时进行模型评估 ---
-                #is_checkpoint_interval = (i % CHECKPOINT_INTERVAL == 0) and (i != 0)
-                is_checkpoint_interval = i % CHECKPOINT_INTERVAL == 0
+                is_checkpoint_interval = (i % CHECKPOINT_INTERVAL == 0) and (i != 0)
+                # is_checkpoint_interval = i % CHECKPOINT_INTERVAL == 0
                 # 我们使用 "是否到达检查点" 作为触发模型评估的唯一条件
                 if is_checkpoint_interval:
                     print(f"\n--- 周期 {i}: 到达检查点，开始在当前环境进行模型测试 (共 {NUM_TEST_EPISODES} 轮) ---")

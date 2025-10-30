@@ -602,9 +602,10 @@ class RobotRun(Darwin):
                     else:
                         print(f'catch_flag={self.catch_flag}, done=1----------------->583PPO')
                         self.return_flag_list.update({'count':1, 'done':1, 'good':1})
-                        print(f'i2={i}, 当前值={self.next_state[i]:.4f}, 目标值={self.future_state[i]:.4f}, 差值={self.cha_zhi:.4f}, done={self.return_flag_list["done"]}')
-                        break
-                        # continue
+                        print(f'未达到位置舵机={i}, 当前值={self.next_state[i]:.4f}, 目标值={self.future_state[i]:.4f}, 差值={self.cha_zhi:.4f}, done={self.return_flag_list["done"]}')
+                        print('将跳过这一步，执行下一步......')
+                        # break
+                        continue
         # 否则catch_flag为非0，即已经抓到了
         else:
             timer = 0  # 计时器

@@ -237,7 +237,7 @@ class SilentChartApp:
         # 应用平滑
         if self.smooth_enabled.get():
             y_data = self.apply_smoothing(y_data)
-            line_label = f"{y_label} (平滑后)"
+            line_label = f"{y_label} (smooth)"
         else:
             line_label = y_label
             

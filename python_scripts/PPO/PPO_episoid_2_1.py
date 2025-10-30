@@ -200,6 +200,7 @@ def PPO_tai_episoid(ppo2_LegUpper=None, ppo2_LegLower=None, ppo2_Ankle=None, exi
 
         if done == 1 or steps > 20:
             print("抬腿回合结束，重置环境...")
+            env.darwin._set_left_leg_initpose()  # 重置左腿
             env.darwin.robot_reset()  # 重置环境
             
             # 增加初始稳定时间
