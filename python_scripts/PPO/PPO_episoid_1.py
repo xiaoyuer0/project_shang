@@ -341,13 +341,42 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
 
             # 稀疏奖励：到达目标附近额外加分
             if success_flag1 == 1:
-                reward += 10.0
+                reward += 100
+            if done == 1 and steps <19 and success_flag1 != 1:
+                print("错误抓取！给予较大惩罚！")
+                reward -= 100
             
             return_all = return_all + reward  # 总奖励为当前奖励加上之前的总奖励
+            return_all -= steps * 0.5
             steps += 1  # 步数加1
             next_obs_img, next_obs_tensor = env.get_img(steps, imgs)  # 获取下一个图像和图像张量
             next_obs = [next_obs_img, next_state]
-
+            # print('获取下一个状态更新完毕')
+            # 记录所有步，避免采样偏置（PPO 需要 on-policy 全覆盖）
+            # ppo_shoulder.store_transition_catch(
+            #     state=[obs_img, robot_state, robot_state],
+            #     action_shoulder=action_shoulder,
+            #     action_arm=action_arm,
+            #     reward=reward,
+            #     next_state=[next_obs_img, next_state, next_state],
+            #     done=done,
+            #     value_shoulder=value_shoulder,
+            #     value_arm=value_arm,
+            #     log_prob_shoulder=log_prob_shoulder,
+            #     log_prob_arm=log_prob_arm
+            # )
+            # ppo_arm.store_transition_catch(
+            #     state=[obs_img, robot_state, robot_state],
+            #     action_shoulder=action_shoulder,
+            #     action_arm=action_arm,
+            #     reward=reward,
+            #     next_state=[next_obs_img, next_state, next_state],
+            #     done=done,
+            #     value_shoulder=value_shoulder,
+            #     value_arm=value_arm,
+            #     log_prob_shoulder=log_prob_shoulder,
+            #     log_prob_arm=log_prob_arm
+            # )
             ppo_catch.store_transition_catch(
                 state=[obs_img, robot_state, robot_state],
                 action_shoulder=action_shoulder,
