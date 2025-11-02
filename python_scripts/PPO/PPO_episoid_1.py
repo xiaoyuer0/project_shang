@@ -342,7 +342,7 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
             # 稀疏奖励：到达目标附近额外加分
             if success_flag1 == 1:
                 reward += 100
-            if done == 1 and steps <19 and success_flag1 != 1:
+            if done == 1 and steps <6 and success_flag1 != 1:
                 print("错误抓取！给予较大惩罚！")
                 reward -= 100
             
