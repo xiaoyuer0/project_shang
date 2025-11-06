@@ -499,14 +499,14 @@ class RobotRun(Darwin):
                 # 压力传感器值为1.0
                 if self.touch_peng[m].getValue() == 1.0:
                     print(f'catch_flag={self.catch_flag}, done=1---------->480ppo')
-                    self.return_flag_list.update({'done':1, 'reward':0, 'good':1, 'count':0})
+                    self.return_flag_list.update({'done':0, 'reward':0, 'good':1, 'count':0})
                     # 返回下一个状态，奖励，完成，好，目标，计数
-                    return self.next_state, \
-                           self.return_flag_list['reward'], \
-                           self.return_flag_list['done'], \
-                           self.return_flag_list['good'], \
-                           self.return_flag_list['goal'], \
-                           self.return_flag_list['count']
+                    # return self.next_state, \
+                    #        self.return_flag_list['reward'], \
+                    #        self.return_flag_list['done'], \
+                    #        self.return_flag_list['good'], \
+                    #        self.return_flag_list['goal'], \
+                    #        self.return_flag_list['count']
             # print(f'grasp_L1=', self.touch_sensors['grasp_L1'].getValue())
             # print(f'grasp_L1_1=', self.touch_sensors['grasp_L1_1'].getValue())
             # print(f'grasp_L1_2=', self.touch_sensors['grasp_L1_2'].getValue())
@@ -541,10 +541,41 @@ class RobotRun(Darwin):
                 # 遍历压力传感器    
                 for j in range(len(self.touch)):
                     self.touch_value[j] = self.touch[j].getValue()  # 压力传感器值
-                sucess = np.array_equal(self.touch_value, Darwin_config.touch_T)  # 成功标识符=压力传感器值与目标值相等    
+                
+                # 【修复】改进抓取判断逻辑：检查所有相关传感器，而不仅仅是两个
+                # 读取所有抓取传感器的值
+                all_grasp_sensors = [
+                    self.touch_sensors['grasp_L1'].getValue(),
+                    self.touch_sensors['grasp_L1_1'].getValue(),
+                    self.touch_sensors['grasp_L1_2'].getValue(),
+                    self.touch_sensors['grasp_R1'].getValue(),
+                    self.touch_sensors['grasp_R1_1'].getValue(),
+                    self.touch_sensors['grasp_R1_2'].getValue()
+                ]
+                
+                # 计算左右两侧的传感器触发情况
+                left_sensors = all_grasp_sensors[0:3]  # grasp_L1, grasp_L1_1, grasp_L1_2
+                right_sensors = all_grasp_sensors[3:6]  # grasp_R1, grasp_R1_1, grasp_R1_2
+                left_any = any(left_sensors)  # 左侧任意传感器触发
+                right_any = any(right_sensors)  # 右侧任意传感器触发
+                
+                # 【修复】使用更宽松的成功判断：左右两侧都有传感器触发即可
+                # 同时保留原有的严格判断作为备选
+                sucess_strict = np.array_equal(self.touch_value, Darwin_config.touch_T)  # 严格判断：两个特定传感器都为1.0
+                sucess_relaxed = left_any and right_any  # 宽松判断：左右两侧都有传感器触发
+                sucess = sucess_strict or sucess_relaxed  # 任一条件满足即成功
                 sucess = np.int(sucess)  # 成功标识符=1
-                faild = np.array_equal(self.touch_value, Darwin_config.touch_F)  # 失败标识符=压力传感器值与失败值相等
+                
+                # 失败判断：两个特定传感器都为0.0，且左右两侧都没有传感器触发
+                faild_strict = np.array_equal(self.touch_value, Darwin_config.touch_F)  # 严格判断
+                faild_relaxed = not left_any and not right_any  # 宽松判断：左右两侧都没有传感器触发
+                faild = faild_strict and faild_relaxed  # 两个条件都满足才失败
                 faild = np.int(faild)  # 失败标识符=1
+                
+                # 打印调试信息
+                print(f"抓取判断 - 传感器值: {self.touch_value}, 所有传感器: {all_grasp_sensors}")
+                print(f"左侧触发: {left_any}, 右侧触发: {right_any}, 成功: {sucess}, 失败: {faild}")
+                
                 # 失败标识符=1且步长小于等于5
                 if faild == 1 and self.step <= 5:
                     self.return_flag_list.update({'reward':0, 'count':1, 'done':1, 'good':1})
@@ -563,10 +594,11 @@ class RobotRun(Darwin):
                     # 奖励1+奖励2小于20
                     if (reward1 + reward2) < 20:
                         self.return_flag_list.update({'count':1, 'done':1, 'good':1})
+                        print("抓取成功但位置不佳（奖励<20）")
                     # 奖励1+奖励2大于等于20 
                     else:
                         self.return_flag_list.update({'count':0, 'done':1, 'good':1, 'goal':1})
-                        print("俺抓到了")  
+                        print("俺抓到了！位置良好（奖励>=20）")  
                         # 写入数据
                         with open(path_list['gps_path_DQN'], 'a') as file:
                             gpss = [self.gps1, self.gps2, self.gps3, self.gps4]  # 目标位置
@@ -575,14 +607,26 @@ class RobotRun(Darwin):
                             file.write(gpss1)  # 写入目标位置字符串
                             file.write(",")  # 写入逗号
                             file.close()  # 关闭文件
-                # 成功=0
+                # 【修复】中间状态（部分传感器触发但未完全成功）：根据位置判断
                 else:
-                    # 奖励1+奖励2小于20
-                    if (reward1 + reward2) < 20:
-                        self.return_flag_list.update({'count':1, 'done':1, 'good':1})
-                    # 奖励1+奖励2大于等于20 
+                    # 如果左右两侧都有传感器触发，但严格判断未通过，可能是部分接触
+                    if left_any or right_any:
+                        print(f"部分抓取状态 - 左侧: {left_any}, 右侧: {right_any}")
+                        # 奖励1+奖励2小于20
+                        if (reward1 + reward2) < 20:
+                            self.return_flag_list.update({'count':1, 'done':1, 'good':1})
+                            print("部分抓取但位置不佳")
+                        # 奖励1+奖励2大于等于20 
+                        else:
+                            # 如果位置好，即使部分抓取也给予一定奖励
+                            self.return_flag_list.update({'count':1, 'done':1, 'good':1})
+                            print("部分抓取但位置良好")
                     else:
-                        self.return_flag_list.update({'count':1, 'done':1, 'good':1})
+                        # 完全没有传感器触发
+                        if (reward1 + reward2) < 20:
+                            self.return_flag_list.update({'count':1, 'done':1, 'good':1})
+                        else:
+                            self.return_flag_list.update({'count':1, 'done':1, 'good':1})
             # 遍历电机传感器
             else:
                 for i in range(20):
@@ -602,10 +646,9 @@ class RobotRun(Darwin):
                     else:
                         print(f'catch_flag={self.catch_flag}, done=1----------------->583PPO')
                         self.return_flag_list.update({'count':1, 'done':1, 'good':1})
-                        print(f'未达到位置舵机={i}, 当前值={self.next_state[i]:.4f}, 目标值={self.future_state[i]:.4f}, 差值={self.cha_zhi:.4f}, done={self.return_flag_list["done"]}')
-                        print('将跳过这一步，执行下一步......')
-                        # break
-                        continue
+                        print(f'i2={i}, 当前值={self.next_state[i]:.4f}, 目标值={self.future_state[i]:.4f}, 差值={self.cha_zhi:.4f}, done={self.return_flag_list["done"]}')
+                        break
+                        # continue
         # 否则catch_flag为非0，即已经抓到了
         else:
             timer = 0  # 计时器
@@ -618,10 +661,35 @@ class RobotRun(Darwin):
             # 遍历压力传感器
             for j in range(len(self.touch)):
                 self.touch_value[j] = self.touch[j].getValue()  # 压力传感器值
-            sucess = np.array_equal(self.touch_value, Darwin_config.touch_T)  # 成功=压力传感器值与目标值相等
-            sucess = np.int(sucess)  # 成功=1
-            faild = np.array_equal(self.touch_value, Darwin_config.touch_F)  # 失败=压力传感器值与失败值相等
-            faild = np.int(faild)  # 失败=1
+            
+            # 【修复】使用与上面相同的改进判断逻辑
+            all_grasp_sensors = [
+                self.touch_sensors['grasp_L1'].getValue(),
+                self.touch_sensors['grasp_L1_1'].getValue(),
+                self.touch_sensors['grasp_L1_2'].getValue(),
+                self.touch_sensors['grasp_R1'].getValue(),
+                self.touch_sensors['grasp_R1_1'].getValue(),
+                self.touch_sensors['grasp_R1_2'].getValue()
+            ]
+            
+            left_sensors = all_grasp_sensors[0:3]
+            right_sensors = all_grasp_sensors[3:6]
+            left_any = any(left_sensors)
+            right_any = any(right_sensors)
+            
+            sucess_strict = np.array_equal(self.touch_value, Darwin_config.touch_T)
+            sucess_relaxed = left_any and right_any
+            sucess = sucess_strict or sucess_relaxed
+            sucess = np.int(sucess)
+            
+            faild_strict = np.array_equal(self.touch_value, Darwin_config.touch_F)
+            faild_relaxed = not left_any and not right_any
+            faild = faild_strict and faild_relaxed
+            faild = np.int(faild)
+            
+            print(f"抓取判断(catch_flag!=0) - 传感器值: {self.touch_value}, 所有传感器: {all_grasp_sensors}")
+            print(f"左侧触发: {left_any}, 右侧触发: {right_any}, 成功: {sucess}, 失败: {faild}")
+            
             # 失败=1且步长小于等于5
             if faild == 1 and self.step <= 5:
                 self.return_flag_list.update({'reward':0, 'count':1, 'done':1, 'good':1})
@@ -635,21 +703,30 @@ class RobotRun(Darwin):
                 # 奖励1+奖励2小于20
                 if (reward1 + reward2) < 20:
                     self.return_flag_list.update({'reward':0, 'count':1, 'done':1, 'good':1})
+                    print("抓取成功但位置不佳（奖励<20）")
                 # 奖励1+奖励2大于等于20
                 else:
                     self.return_flag_list.update({'reward':100, 'count':0, 'done':1, 'good':1, 'goal':1})
                     print(self.return_flag_list['reward'])  # 打印奖励
-                    print("俺抓到了")  # 打印"俺抓到了"
+                    print("俺抓到了！位置良好（奖励>=20）")  # 打印"俺抓到了"
                     # 写入数据
                     with open(path_list['gps_path_DQN'], 'a') as file:
                         gpss = str([self.gps1, self.gps2, self.gps3, self.gps4])  # 目标位置
                         file.write(gpss)  # 写入目标位置字符串
                         file.write(",")  # 写入逗号
                         file.close()  # 关闭文件
-            # 奖励1+奖励2大于等于20
+            # 【修复】中间状态处理
             else:
-                # 奖励1+奖励2小于20
-                self.return_flag_list.update({'count':1, 'done':1, 'good':1})
+                if left_any or right_any:
+                    print(f"部分抓取状态(catch_flag!=0) - 左侧: {left_any}, 右侧: {right_any}")
+                    if (reward1 + reward2) < 20:
+                        self.return_flag_list.update({'reward':0, 'count':1, 'done':1, 'good':1})
+                        print("部分抓取但位置不佳")
+                    else:
+                        self.return_flag_list.update({'count':1, 'done':1, 'good':1})
+                        print("部分抓取但位置良好")
+                else:
+                    self.return_flag_list.update({'count':1, 'done':1, 'good':1})
                 """
                 if (reward1 + reward2) < 20:
                     self.return_flag_list.update({'count':1, 'done':1, 'good':1})

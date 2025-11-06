@@ -252,42 +252,35 @@ class Darwin:
             img: 原始图像数组
             img_tensor: 处理后的图像张量
         """
-        # 根据当前步数生成图像文件名
-        img_name = f"img_{step}.png"
+        # 根据当前步数生成图像文件名（与调用代码保持一致：img0.png格式）
+        img_name = f"img{step}.png"
+        
         # 使用Webots的相机API保存图像，100表示图像质量(0-100)
+        # saveImage()会将文件保存到控制器的工作目录
         self.camera.saveImage(img_name, 100)
         
-        # 确保目标目录存在
-        os.makedirs(path_list['photo_path'], exist_ok=True)
+        # 使用相对路径打开图像（与原代码保持一致）
+        # Webots控制器的工作目录通常是控制器所在目录
+        path = f'./{img_name}'
         
-        # 直接保存到目标路径，而不是先保存后移动
         try:
-            # 如果文件已经存在于源路径，则尝试移动
-            if os.path.exists(f"{path_list['photo_path_real']}/{img_name}"):
-                shutil.move(f"{path_list['photo_path_real']}/{img_name}", f"{path_list['photo_path']}/{img_name}")
-            # 如果文件不存在于源路径，则直接使用目标路径的文件
-            elif not os.path.exists(f"{path_list['photo_path']}/{img_name}"):
-                # 如果目标路径也没有文件，则复制一个空白图像作为替代
-                blank_img = Image.new('L', (128, 128), 255)  # 创建空白图像
-                blank_img.save(f"{path_list['photo_path']}/{img_name}")
+            # 打开保存的图像文件
+            img = Image.open(path)
         except Exception as e:
-            print(f"处理图像文件时出错: {e}")
-            
-        # 使用PIL库打开保存的图像文件
-        img = Image.open(f"{path_list['photo_path']}/{img_name}")   
+            print(f"打开图像文件失败: {e}，使用空白图像")
+            # 如果文件不存在，创建一个空白图像
+            img = Image.new('L', (128, 128), 255)
+        
         # 将图像调整为128x128像素大小
         img = img.resize((128, 128))
         # 将图像转换为灰度图像（单通道）
-        img = img.convert('L')  
-        # 将处理后的图像保存到指定路径，添加"1.png"后缀
-        os.makedirs(path_list['photo_path'], exist_ok=True)  # 确保保存路径存在
-        img.save(os.path.join(path_list['photo_path'], img_name))
+        img = img.convert('L')
         # 将PIL图像转换为numpy数组，并归一化到0-1范围
         img_array = np.array(img) / 255.0
         # 将numpy数组转换为PyTorch张量：
         # - unsqueeze(0)添加batch维度
         # - float()转换为浮点类型
-        img_tensor = torch.tensor(img_array).unsqueeze(0).float()   
+        img_tensor = torch.tensor(img_array).unsqueeze(0).float()
         
         # 返回原始数组和处理后的张量
         return img_array, img_tensor

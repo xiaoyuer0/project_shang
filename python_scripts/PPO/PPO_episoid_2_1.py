@@ -1,8 +1,9 @@
 import math
 import torch
 from python_scripts.Webots_interfaces import Environment
-from python_scripts.Project_config import path_list, BATCH_SIZE, LR, EPSILON, GAMMA, TARGET_REPLACE_ITER, MEMORY_CAPACITY, device, gps_goal, gps_goal1
+from python_scripts.Project_config import path_list, BATCH_SIZE, LR, EPSILON, GAMMA, TARGET_REPLACE_ITER, MEMORY_CAPACITY, device, gps_goal, gps_goal1, Darwin_config
 from python_scripts.PPO.PPO_PPOnet_2 import PPO2 
+from python_scripts.utils.sensor_utils import wait_for_sensors_stable, reset_environment 
 from python_scripts.PPO_Log_write import Log_write
 
 def PPO_tai_episoid(ppo2_LegUpper=None, ppo2_LegLower=None, ppo2_Ankle=None, existing_env=None ,total_episode=0, episode=0, log_writer_tai=None, log_file_latest_tai=None):
@@ -139,7 +140,7 @@ def PPO_tai_episoid(ppo2_LegUpper=None, ppo2_LegLower=None, ppo2_Ankle=None, exi
             done = 1
             
         # 定期保存模型
-        if episode % 200 == 0 and done == 1:
+        if episode % 400 == 0 and done == 1:
             save_path = path_list['model_path_tai_PPO'] + f"/ppo_model_tai_{total_episode}_{episode}.ckpt"
             print(f"保存模型到: {save_path}")
             checkpoint = {
@@ -196,14 +197,18 @@ def PPO_tai_episoid(ppo2_LegUpper=None, ppo2_LegLower=None, ppo2_Ankle=None, exi
             # 如果回合结束，重置环境
         print("done:", done)
 
-        # #测试代码
-        # if done == 1 :
-        #     temp_loss = ppo2.learn()
-        #     print("测试代码运行成功")
 
         if done == 1 or steps > 20:
             print("抬腿回合结束，重置环境...")
-            env.darwin._set_left_leg_initpose()  # 重置环境
+            env.darwin._set_left_leg_initpose()  # 重置左腿
+            env.darwin.robot_reset()  # 重置环境
+            
+            # 增加初始稳定时间
+            print("等待稳定...")
+            for _ in range(40):  # 增加40个时间步的稳定时间
+                env.robot.step(env.timestep)
+                
+           
             print("等待一秒...")
             env.wait(1000)
             imgs = []
