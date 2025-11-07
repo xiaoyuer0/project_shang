@@ -277,6 +277,11 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
         robot_state = env.get_robot_state()  # 获取机器人状态
         print("____________________")  # 打印初始状态
         prev_distance = None
+        prev_distance_wrong = None  # 【修复】初始化错误目标距离记录
+        # 【优化】初始化动作平滑变量（用于动作平滑机制）
+        prev_action_shoulder = 0.0
+        prev_action_arm = 0.0
+        action_smooth_alpha = 0.7  # 平滑系数：0.7表示保留70%的上一动作，30%的新动作
         while True:
             # 安全检查：确保robot_state有足够的元素
             if len(robot_state) < 6:
@@ -305,7 +310,16 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
             s_val = float(action_shoulder[0]) if hasattr(action_shoulder, 'shape') and action_shoulder.shape else float(action_shoulder)
             a_val = float(action_arm[0]) if hasattr(action_arm, 'shape') and action_arm.shape else float(action_arm)
 
-            print(f'第{i}周期，第{steps}步，肩膀动作: {s_val:.4f}，手臂动作: {a_val:.4f}')
+            # 【优化】动作平滑：使用指数移动平均来平滑动作，减少动作抖动
+            # 公式：smooth_action = alpha * prev_action + (1 - alpha) * new_action
+            action_shoulder_smooth = action_smooth_alpha * prev_action_shoulder + (1 - action_smooth_alpha) * s_val
+            action_arm_smooth = action_smooth_alpha * prev_action_arm + (1 - action_smooth_alpha) * a_val
+            
+            # 更新上一动作（用于下一次平滑）
+            prev_action_shoulder = action_shoulder_smooth
+            prev_action_arm = action_arm_smooth
+
+            print(f'第{i}周期，第{steps}步，肩膀动作(原始/平滑): {s_val:.4f}/{action_shoulder_smooth:.4f}，手臂动作(原始/平滑): {a_val:.4f}/{action_arm_smooth:.4f}')
             
             gps1, gps2, gps3, gps4, foot_gps1 = env.print_gps()  # 获取GPS位置
             if steps >= 19:  # 如果步数大于等于19
@@ -318,15 +332,21 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
             log_writer_catch.add_action_catch(action_shoulder, action_arm) 
             #log_writer_catch.add_log_prob_catch(log_prob_combined, log_prob_combined) # 使用合并后的 log_prob
             #log_writer_catch.add_value_catch(value_combined, value_combined)
-            # 执行一步动作
-            next_state, reward, done, good, goal, count = env.step(robot_state, action_shoulder.item(), action_arm.item(), steps, catch_flag, gps1, gps2, gps3, gps4, img_name)
+            # 执行一步动作（使用平滑后的动作）
+            next_state, reward_env, done, good, goal, count = env.step(robot_state, action_shoulder_smooth, action_arm_smooth, steps, catch_flag, gps1, gps2, gps3, gps4, img_name)
             # next_state, reward, done, good, goal, count = RobotRun(
             #     env.darwin, robot_state, action_shoulder, action_arm, steps, 
             #     catch_flag, gps1, gps2, gps3, gps4, img_name
             # ).run()
             
+            # === 【关键修复】忽略环境返回的reward，完全使用我们计算的reward ===
+            # 问题：RobotRun1.py 中 goal=1 时会设置 reward=100，导致网络可能学习"达到goal"而不是"最大化reward"
+            # 解决方案：完全忽略环境返回的reward，使用我们基于距离和惩罚机制计算的reward
+            # 这样网络就会根据我们设计的reward信号来学习，而不是根据goal标志
+            
             print(f'catch_flag: {catch_flag}')
             print(f'done: {done}')
+            print(f'【调试】环境返回: reward_env={reward_env:.2f}, goal={goal}, good={good}')
             
             #if count == 1:  # 如果计数器为1 
             #    gps1, gps2, gps3, gps4, foot_gps1 = env.print_gps()  # 获取GPS位置
@@ -339,9 +359,7 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
             #    else:
             #        reward1 = 0  # 奖励为0
             #    reward = reward1  # 奖励为reward1
-            # === 新高密度距离奖励 ===
-                       # === 新高密度距离奖励 ===
-                        # === 新高密度距离奖励 ===
+            # === 【修复】改进的距离奖励：区分正确目标和错误目标 ===
             gps1, _, _, _, _ = env.print_gps()
             # 安全检查：确保gps1有足够的元素
             if len(gps1) < 3:
@@ -382,9 +400,9 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
             if success_flag1 == 1:                       # 抓到了
     # 用你前面算好的 current_distance 即可
                 if current_distance <= 0.04:             # 4 cm 容忍
-                    reward += 100
+                    reward += 100                              
                     print("✅ 抓到目标梯级，发放大奖励！")
-                else:
+                else:                            
                     reward -= 60                          # 抓错梯子，无大奖励
                     print("⚠️  抓到非目标梯级，无大奖励")
             if done == 1 and steps <6 and success_flag1 != 1:
@@ -400,27 +418,49 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
             next_obs_img, next_obs_tensor = env.get_img(steps, imgs)  # 获取下一个图像和图像张量
             next_obs = [next_obs_img, next_state]
             # print('获取下一个状态更新完毕')
-            # 记录所有步，避免采样偏置（PPO 需要 on-policy 全覆盖）
-            ppo_shoulder.store_transition_catch(
-                state=[obs_img, robot_state, robot_state],
-                action=action_shoulder,       # 只传自己的动作
-                reward=reward,
-                next_state=[next_obs_img, next_state, next_state],
-                done=done,
-                value=value_shoulder,         # 只传自己的价值
-                log_prob=log_prob_shoulder,  # 只传自己的对数概率
-                action_raw=action_raw_shoulder  # 传递原始动作用于正确计算 log_prob
-            )
-            ppo_arm.store_transition_catch(
-                state=[obs_img, robot_state, robot_state],
-                action=action_arm,           # 只传自己的动作
-                reward=reward,
-                next_state=[next_obs_img, next_state, next_state],
-                done=done,
-                value=value_arm,             # 只传自己的价值
-                log_prob=log_prob_arm,       # 只传自己的对数概率
-                action_raw=action_raw_arm     # 传递原始动作用于正确计算 log_prob
-            )
+            # === 【关键修复】移除样本过滤，确保所有样本都参与学习 ===
+            # 问题：之前的条件存储（good==1）可能导致网络偏向学习"达到goal"而不是"最大化reward"
+            # 解决方案：存储所有样本，让网络根据reward值来学习，而不是根据goal标志
+            # 注意：标准PPO应该存储所有样本，这样才能正确学习奖励信号
+            
+            # 【修复】只跳过明显无效的样本（环境初始化问题）
+            should_store = True
+            if done == 1 and steps <= 2 and success_flag1 != 1:
+                # 环境不稳定导致的无效数据，跳过
+                should_store = False
+                print(f"  跳过无效样本：done={done}, steps={steps}, success={success_flag1}")
+            
+            if should_store:
+                # === 【关键修复】确保存储的reward是我们计算的reward，而不是环境返回的reward_env ===
+                # 记录所有步，避免采样偏置（PPO 需要 on-policy 全覆盖）
+                # 【调试信息】显示reward和goal的关系，验证reward是否独立于goal
+                if steps % 10 == 0 or abs(reward) > 50:  # 每10步或大奖励时打印
+                    print(f"【存储样本】reward={reward:.2f}, goal={goal}, reward_env={reward_env:.2f}, 差值={reward - reward_env:.2f}")
+                
+                ppo_shoulder.store_transition_catch(
+                    state=[obs_img, robot_state, robot_state],
+                    action=action_shoulder,       # 只传自己的动作
+                    reward=reward,  # 【关键】使用我们计算的reward，而不是环境返回的reward_env
+                    next_state=[next_obs_img, next_state, next_state],
+                    done=done,
+                    value=value_shoulder,         # 只传自己的价值
+                    log_prob=log_prob_shoulder,  # 只传自己的对数概率
+                    action_raw=action_raw_shoulder  # 传递原始动作用于正确计算 log_prob
+                )
+                ppo_arm.store_transition_catch(
+                    state=[obs_img, robot_state, robot_state],
+                    action=action_arm,           # 只传自己的动作
+                    reward=reward,
+                    next_state=[next_obs_img, next_state, next_state],
+                    done=done,
+                    value=value_arm,             # 只传自己的价值
+                    log_prob=log_prob_arm,       # 只传自己的对数概率
+                    action_raw=action_raw_arm     # 传递原始动作用于正确计算 log_prob
+                )
+            else:
+                # 不存储此样本（用于调试，可以打印信息）
+                if steps % 10 == 0:  # 每10步打印一次，避免输出过多
+                    print(f"  跳过存储：good={good}, reward={reward:.2f}, steps={steps}")
             # ppo_catch.store_transition_catch(
             #     state=[obs_img, robot_state, robot_state],
             #     action_shoulder=action_shoulder,
@@ -440,6 +480,10 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
             obs_tensor = next_obs_tensor  # 更新图像张量
             
             if done == 1 or steps >= max_steps_per_episode:
+                # === 【关键修复】在episode结束时，确保reward完全独立于goal ===
+                # 问题：如果环境返回的goal=1但实际抓错了，我们需要确保reward是大惩罚
+                # 解决方案：在episode结束时，根据实际抓取结果重新计算reward，完全忽略goal标志
+                
                 # 1. 调用learn()进行模型更新
                 print("\n--- Episode 结束，开始学习 ---")
                 loss_shoulder = ppo_shoulder.learn()

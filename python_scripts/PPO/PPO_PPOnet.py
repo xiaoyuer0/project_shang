@@ -47,7 +47,9 @@ class ActorCritic(nn.Module):
         
         # 将log_sigma作为可学习的参数，而不是依赖于状态。这是一种常见且稳定的做法。
         # act_dim 应该是动作的维度，这里是1
-        self.actor_log_sigma = nn.Parameter(torch.zeros(1))
+        # 【修复】降低初始探索噪声：从0（对应sigma=1.0）改为-1.0（对应sigma≈0.37）
+        # 这样可以减少过度探索，让网络更快收敛到好的策略
+        self.actor_log_sigma = nn.Parameter(torch.tensor([-1.0]))  # 初始sigma ≈ 0.37，而不是1.0
         
         # Critic头：输出状态值
         self.critic = nn.Linear(200, 1)
@@ -151,7 +153,7 @@ class PPO:
         self.gae_lambda = 0.95  # GAE参数
         self.clip_ratio = 0.1  # PPO裁剪参数
         self.value_coef = 0.5  # 值函数损失系数
-        self.entropy_coef = 0.1  # 增加熵系数，提高探索
+        self.entropy_coef = 0.01  # 【优化】降低熵系数，减少探索，提高收敛稳定性（从0.1降低到0.01）
         self.max_grad_norm = 1.0  # 梯度裁剪阈值
 
         # 学习率和优化器参数
@@ -159,7 +161,7 @@ class PPO:
         self.lr_decay = 0.999  # 减缓学习率衰减
 
         # PPO更新参数
-        self.update_epochs = 4  # 【优化】减少更新次数，防止过度拟合
+        self.update_epochs = 8  # 【优化】增加更新次数，提高学习稳定性（从4增加到8）
         self.batch_size = 64  # 批大小
 
         # 初始化策略网络
@@ -302,8 +304,21 @@ class PPO:
         # 计算回报
         returns = advantages + values
 
-        # 标准化优势函数
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        # 【关键修复】改进优势函数标准化，避免过度削弱负奖励的影响
+        # 问题：原来的标准化会将所有优势函数标准化为均值0、标准差1
+        # 这会导致即使奖励是-500，标准化后可能只是-1或-2，网络无法区分"非常坏"和"一般坏"
+        # 
+        # 解决方案：使用更温和的标准化，保留负奖励的相对强度
+        # 方法1：只中心化（减去均值），不除以标准差（保留原始尺度）
+        # 方法2：使用更温和的标准化（除以标准差，但保留更多原始信息）
+        # 这里使用方法1：只中心化，保留原始尺度，让负奖励的影响更明显
+        advantages_mean = advantages.mean()
+        advantages = advantages - advantages_mean  # 只中心化，不标准化
+        
+        # 可选：如果优势函数方差太大，可以适度缩放（但不完全标准化）
+        # advantages_std = advantages.std()
+        # if advantages_std > 10.0:  # 如果标准差太大，适度缩放
+        #     advantages = advantages / (advantages_std / 10.0 + 1e-8)
 
         return advantages, returns
 
@@ -377,6 +392,8 @@ class PPO:
                 # 这样对于batch size小的情况不会太慢
                 
                 # 获取当前批次的动作、对数概率、优势、回报等
+                # 【修复】确保batch_indices是整数类型，用于索引
+                batch_indices_int = batch_indices.cpu().numpy() if isinstance(batch_indices, torch.Tensor) else batch_indices
                 batch_actions_curr = batch_actions[batch_indices]
                 batch_log_probs_curr = batch_log_probs[batch_indices]
                 batch_advantages_curr = batch_advantages[batch_indices]
@@ -384,7 +401,8 @@ class PPO:
                 
                 # --- 【核心修改】计算新的对数概率和熵 ---
                 # 【关键修复】需要获取原始动作（action_raw）来计算正确的 log_prob
-                batch_actions_raw = torch.tensor([self.actions_raw[int(idx)] for idx in batch_indices], 
+                # 【修复】使用batch_indices_int来索引Python列表
+                batch_actions_raw = torch.tensor([self.actions_raw[int(idx)] for idx in batch_indices_int], 
                                                   dtype=torch.float32).to(device)
                 
                 policy_loss = 0
@@ -392,14 +410,12 @@ class PPO:
                 # 遍历批次中的每一个样本
                 for i in range(len(batch_x)):
                     # 【关键修复】使用 action_raw 计算 log_prob，然后应用 tanh squashing 修正
-                    # 处理维度：确保 action_raw_i 是正确的形状
+                    # 【修复】简化维度处理：确保 action_raw_i 是正确的形状 [act_dim]
                     action_raw_i = batch_actions_raw[i]
-                    if action_raw_i.dim() == 0:  # 标量
-                        action_raw_i = action_raw_i.unsqueeze(0)
-                    elif action_raw_i.dim() == 1 and action_raw_i.shape[0] == 1:
-                        pass  # 已经是正确的形状 [1]
-                    else:
-                        action_raw_i = action_raw_i.unsqueeze(-1) if action_raw_i.dim() == 0 else action_raw_i
+                    if action_raw_i.dim() == 0:  # 标量，需要添加维度
+                        action_raw_i = action_raw_i.unsqueeze(0)  # 变成 [1]
+                    # 如果已经是1维且长度为act_dim，则保持不变
+                    # 注意：对于act_dim=1的情况，shape应该是[1]
                     
                     # 计算原始分布的对数概率
                     new_log_prob_raw = dists[i].log_prob(action_raw_i)
