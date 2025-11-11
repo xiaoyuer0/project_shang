@@ -400,20 +400,23 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
             if success_flag1 == 1:                       # 抓到了
     # 用你前面算好的 current_distance 即可
                 if current_distance <= 0.04:             # 4 cm 容忍
-                    reward += 100                              
+                    reward += 200                              
                     print("✅ 抓到目标梯级，发放大奖励！")
                 else:                            
-                    reward -= 60                          # 抓错梯子，无大奖励
+                    reward -= 160                         # 抓错梯子，无大奖励
                     print("⚠️  抓到非目标梯级，无大奖励")
             if done == 1 and steps <6 and success_flag1 != 1:
+                print("错误抓取！给予较大惩罚！")
+                reward -= 100
+            if done == 1 and steps >=6 and success_flag1 != 1:
                 print("错误抓取！给予较大惩罚！")
                 reward -= 100
             if done == 1 and steps <= 2 and success_flag1 != 1:
                 print("因环境不稳定导致无效数据，跳过此步骤！！！")
                 break
-            
+            reward -= steps * 0.5
             return_all = return_all + reward  # 总奖励为当前奖励加上之前的总奖励
-            return_all -= steps * 0.5
+            
             steps += 1  # 步数加1
             next_obs_img, next_obs_tensor = env.get_img(steps, imgs)  # 获取下一个图像和图像张量
             next_obs = [next_obs_img, next_state]
