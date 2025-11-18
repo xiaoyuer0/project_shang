@@ -144,8 +144,9 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
             checkpoint = torch.load(model_path)
             if isinstance(checkpoint, dict) and 'policy_shoulder' in checkpoint:
                 # 如果是保存的字典格式 {'policy': state_dict, ...}
-                ppo_shoulder.policy.load_state_dict(checkpoint['policy_shoulder'])
-                ppo_arm.policy.load_state_dict(checkpoint['policy_arm'])
+                # 增加 strict=False 以兼容添加 LMF 后新增的参数键
+                ppo_shoulder.policy.load_state_dict(checkpoint['policy_shoulder'], strict=False)
+                ppo_arm.policy.load_state_dict(checkpoint['policy_arm'], strict=False)
                 # 如果需要加载优化器状态
                 if 'optimizer_shoulder' in checkpoint and ppo_shoulder.optimizer:
                     ppo_shoulder.optimizer.load_state_dict(checkpoint['optimizer_shoulder'])
@@ -156,8 +157,8 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
                 print(f"从指定模型加载: {model_path}，从周期 {episode_start} 继续训练")
             else:
                 # 如果是直接保存的模型或状态字典
-                ppo_shoulder.policy.load_state_dict(checkpoint)
-                ppo_arm.policy.load_state_dict(checkpoint)
+                ppo_shoulder.policy.load_state_dict(checkpoint, strict=False)
+                ppo_arm.policy.load_state_dict(checkpoint, strict=False)
                 print(f"指定模型文件 {model_path} 格式不匹配或不是字典格式，从头开始训练。")
                 episode_start = 0
         except Exception as e:
@@ -177,8 +178,8 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
                 checkpoint = torch.load(latest_model)
                 if isinstance(checkpoint, dict) and 'policy_shoulder' in checkpoint:
                     # 如果是保存的字典格式 {'policy': state_dict, ...}
-                    ppo_shoulder.policy.load_state_dict(checkpoint['policy_shoulder'])
-                    ppo_arm.policy.load_state_dict(checkpoint['policy_arm'])
+                    ppo_shoulder.policy.load_state_dict(checkpoint['policy_shoulder'], strict=False)
+                    ppo_arm.policy.load_state_dict(checkpoint['policy_arm'], strict=False)
                     # 如果需要加载优化器状态
                     if 'optimizer_shoulder' in checkpoint and ppo_shoulder.optimizer:
                         ppo_shoulder.optimizer.load_state_dict(checkpoint['optimizer_shoulder'])
@@ -187,8 +188,7 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
                     print("抓取模型加载成功！")
                 else:
                     # 如果是直接保存的模型或状态字典
-                    ppo_shoulder.policy.load_state_dict(checkpoint)
-                    ppo_arm.policy.load_state_dict(checkpoint)
+                    ppo_shoulder.policy.load_state_dict(checkpoint, strict=False)
                     print("抓取模型加载成功！(旧格式)")
                     
             except Exception as e:
