@@ -8,7 +8,69 @@ from python_scripts.Webots_interfaces import Environment
 # from Data_fusion import data_fusion
 from python_scripts.Project_config import path_list, gps_goal, gps_goal1, device
 from python_scripts.SAC.SAC_Log_write import SAC_Log_write
+from python_scripts.utils.sensor_utils import wait_for_sensors_stable, reset_environment
 import numpy as np
+import heapq
+import os
+
+
+class ModelRanking:
+    """
+    追踪和管理前 N 个最佳 SAC 模型的辅助类：
+    - 与 PPO 版本逻辑保持一致，使用最小堆维护排行榜
+    - 新模型优于当前最差模型时，自动删除最差模型文件
+    """
+    def __init__(self, top_n=5, key_name='success_rate'):
+        self.top_n = top_n
+        self.rankings = []
+        self.key_name = key_name
+        self.saved_paths = []
+
+    def add_and_manage(self, new_score, new_checkpoint, episode_id, base_dir):
+        """
+        根据新模型的评分（成功率）决定是否保存，并在需要时删除旧模型。
+        """
+        new_entry = (new_score, "")
+
+        should_save = False
+        final_save_path = ""
+
+        if len(self.rankings) < self.top_n:
+            should_save = True
+            final_save_path = os.path.join(base_dir, f'sac_model_success_{episode_id}.ckpt')
+        elif new_score > self.rankings[0][0]:
+            should_save = True
+            final_save_path = os.path.join(base_dir, f'sac_model_success_{episode_id}.ckpt')
+            worst_score, worst_path_to_delete = heapq.heappop(self.rankings)
+            try:
+                os.remove(worst_path_to_delete)
+                print(f"删除旧 SAC 模型文件: {worst_path_to_delete} (成功率: {worst_score:.2f}%)")
+            except FileNotFoundError:
+                print(f"警告: 试图删除不存在的文件 {worst_path_to_delete}")
+
+        if should_save:
+            torch.save(new_checkpoint, final_save_path)
+            new_entry = (new_score, final_save_path)
+            heapq.heappush(self.rankings, new_entry)
+            print(f"SAC 模型 {episode_id} (成功率: {new_score:.2f}%) 已保存到 {final_save_path} 并加入排行榜。")
+            return final_save_path
+        else:
+            print(f"SAC 模型 {episode_id} (成功率: {new_score:.2f}%) 未进入前 {self.top_n}，未保存。")
+            return None
+
+    def print_current_rankings(self):
+        """打印当前排行榜内容。"""
+        if not self.rankings:
+            print("当前 SAC 排行榜为空。")
+            return
+
+        print("\n--- 基于测试成功率的最佳 SAC 模型排行榜 ---")
+        sorted_rankings = sorted(self.rankings, key=lambda x: x[0], reverse=True)
+        for i, (score, path) in enumerate(sorted_rankings, 1):
+            ep_num = path.split('_')[-1].split('.')[0]
+            print(f"  {i}. Episode {ep_num}: Success Rate = {score:.2f}%, Path = {path}")
+        print("-----------------------------------------\n")
+
 
 def SAC_episoid(model_path=None):
     # 创建SAC算法对象，将act_dim从2改为连续动作空间的维度
@@ -140,21 +202,37 @@ def SAC_episoid(model_path=None):
 
     tai_episoid = 1
     episode_num = episode_start  # 初始化回合计数器
-    rpm = ReplayMemory(100000)  # 创建经验回放缓存
+    rpm = ReplayMemory(30000)  # 创建经验回放缓存（缩小为 30000，更偏向近期数据）
     rpm_2 = ReplayMemory_2(100000)
     env = Environment()
 
     # SAC算法的训练更新次数
     SAC_UPDATES_PER_STEP = 1
 
+    # 模型评估 & 排行榜参数（与 PPO 逻辑保持一致）
+    top_n_models = 5
+    model_ranking = ModelRanking(top_n=top_n_models)
+    CHECKPOINT_INTERVAL = 500   # 每 500 周期做一次评估
+    NUM_TEST_EPISODES = 100     # 每次评估统计 100 个有效 episode
+    MAX_TEST_ATTEMPTS = 5       # 初始化失败的最大重试次数
+
     for i in range(episode_start, episode_start + 50000):  # 从episode_start开始，最多再训练50000个周期
         log_writer_catch.add(episode_num=i)
         print(f"<<<<<<<<<第{i}周期") # 打印当前周期
         env.reset()
         env.wait(500)   # 等待500ms
+        # 使用与 PPO 相同的方式检查传感器稳定性，避免无效数据
+        if not wait_for_sensors_stable(env, max_retries=40, wait_ms=200):
+            print("警告: 传感器不稳定，尝试重置环境...")
+            reset_environment(env)
         imgs = []  # 初始化图像列表
         steps = 0  # 初始化步数
         return_all = 0  # 初始化总奖励
+        prev_distance = None
+        # 动作平滑相关变量（与 PPO 保持一致，减少动作抖动）
+        prev_action_shoulder = 0.0
+        prev_action_arm = 0.0
+        action_smooth_alpha = 0.7  # 平滑系数
         obs_img, obs_tensor = env.get_img(steps, imgs)  # 获取初始图像和图像张量
         # log_writer_catch.add(obs_img=obs_img, steps=steps)
         robot_state = env.get_robot_state()  # 获取机器人状态
@@ -167,19 +245,29 @@ def SAC_episoid(model_path=None):
             obs = [obs_img, sac_state]
             # log_writer_catch.add(obs=obs, steps=steps)
             # 输入次数、状态，选择动作
-            # 对连续动作空间进行离散化处理，将SAC输出的连续动作映射为离散动作
-            continuous_action = sac.choose_action(episode_num=episode_num, 
-                                              obs=obs,
-                                              x_graph=robot_state)
-                                              
-            # 将连续动作映射为离散动作：这里假设动作空间为[-1,1]，将其映射到{0,1}
-            # 我们取第一个动作维度的值，大于0则输出1，否则输出0
+            # SAC 输出连续动作（2 维：肩膀/手臂），与 PPO 的动作空间保持一致
+            continuous_action = sac.choose_action(
+                episode_num=episode_num,
+                obs=obs,
+                x_graph=robot_state
+            )
+
+            # 解析连续动作为肩膀和手臂两个关节
             if isinstance(continuous_action, np.ndarray):
-                a = 1 if continuous_action[0] > 0 else 0
+                action_shoulder = float(continuous_action[0])
+                action_arm = float(continuous_action[1]) if continuous_action.shape[0] > 1 else float(continuous_action[0])
             else:
-                a = 1 if continuous_action > 0 else 0
-                
-            print(f'第{i}周期，第{steps}步，动作a: {a}，原始动作: {continuous_action}')
+                # 兼容性处理：如果只返回一个标量，则两个关节共用
+                action_shoulder = float(continuous_action)
+                action_arm = float(continuous_action)
+
+            # 动作平滑（指数移动平均），减少抖动，和 PPO 保持一致
+            action_shoulder_smooth = action_smooth_alpha * prev_action_shoulder + (1 - action_smooth_alpha) * action_shoulder
+            action_arm_smooth = action_smooth_alpha * prev_action_arm + (1 - action_smooth_alpha) * action_arm
+            prev_action_shoulder = action_shoulder_smooth
+            prev_action_arm = action_arm_smooth
+
+            print(f'第{i}周期，第{steps}步，肩膀动作(原始/平滑): {action_shoulder:.4f}/{action_shoulder_smooth:.4f}，手臂动作(原始/平滑): {action_arm:.4f}/{action_arm_smooth:.4f}')
             
             # env.wait(1000)
             # print('wait 1000ms')
@@ -190,30 +278,83 @@ def SAC_episoid(model_path=None):
             else:
                 catch_flag = 0.0  # 抓取器状态为0.0
             img_name = "img" + str(steps) + ".png"  # 图像名称
-            # print("action:", a)
-            # 添加动作到日志
-            log_writer_catch.add_action(a)
+            # 添加动作到日志（保留原有接口）
             log_writer_catch.add_continuous_action(continuous_action)  # 添加连续动作记录
-            # 执行一步动作
-            next_state, reward, done, good, goal, count = env.step(robot_state, a, steps, catch_flag, gps1, gps2, gps3, gps4, img_name)
+
+            # 执行一步动作（使用平滑后的连续动作，与 PPO 一致）
+            next_state, reward_env, done, good, goal, count = env.step(
+                robot_state,
+                action_shoulder_smooth,
+                action_arm_smooth,
+                steps,
+                catch_flag,
+                gps1, gps2, gps3, gps4,
+                img_name
+            )
             print(f'catch_flag: {catch_flag}')
             print(f'done: {done}')
-            
-            if count == 1:  # 如果计数器为1 
-                gps1, gps2, gps3, gps4, foot_gps1 = env.print_gps()  # 获取GPS位置
-                x1 = gps_goal[0] - gps1[1]  # 计算目标位置与当前位置的差值
-                y1 = gps_goal[1] - gps1[2]
-                if x1 > -0.03 and y1 < 0.03:
-                    reward1 = 1  # 奖励为1
-                elif -0.05 < x1 < -0.03 and 0.03 < y1 < 0.05:
-                    reward1 = 1  # 奖励为1
+            print(f'【调试】环境返回: reward_env={reward_env:.2f}, goal={goal}, good={good}')
+
+            # === 与 PPO 对齐的距离奖励设计 ===
+            gps1, _, _, _, _ = env.print_gps()
+            if len(gps1) < 3:
+                print(f"警告：gps1长度不足 ({len(gps1)} < 3)，使用默认值")
+                dx = 0.0
+                dy = 0.0
+            else:
+                dx = gps_goal[0] - gps1[1]
+                dy = gps_goal[1] - gps1[2]
+            current_distance = (dx ** 2 + dy ** 2) ** 0.5
+
+            # 距离变化奖励（鼓励靠近目标）
+            if prev_distance is not None:
+                reward = (prev_distance - current_distance) * 15.0
+            else:
+                reward = -current_distance
+            prev_distance = current_distance
+
+            # 抓取传感器组合判断，与 PPO 保持一致
+            all_grasp_sensors = [
+                env.darwin.get_touch_sensor_value('grasp_L1'),
+                env.darwin.get_touch_sensor_value('grasp_L1_1'),
+                env.darwin.get_touch_sensor_value('grasp_L1_2'),
+                env.darwin.get_touch_sensor_value('grasp_R1'),
+                env.darwin.get_touch_sensor_value('grasp_R1_1'),
+                env.darwin.get_touch_sensor_value('grasp_R1_2')
+            ]
+            left_sensors = all_grasp_sensors[0:3]
+            right_sensors = all_grasp_sensors[3:6]
+            left_any = any(left_sensors)
+            right_any = any(right_sensors)
+            success_flag1 = 1 if (left_any and right_any) else 0
+            if env.is_collision():
+                reward -= 50
+
+            if success_flag1 == 1:
+                if current_distance <= 0.04:
+                    reward += 300
+                    print("✅ 抓到目标梯级，发放大奖励！")
                 else:
-                    reward1 = 0  # 奖励为0
-                reward = reward1  # 奖励为reward1
+                    reward -= 160
+                    print("⚠️ 抓到非目标梯级，无大奖励")
+
+            if done == 1 and steps < 6 and success_flag1 != 1:
+                print("错误抓取！给予较大惩罚！")
+                reward -= 100
+            if done == 1 and steps >= 6 and success_flag1 != 1:
+                print("错误抓取！给予较大惩罚！")
+                reward -= 100
+            if done == 1 and steps <= 2 and success_flag1 != 1:
+                print("因环境不稳定导致无效数据，跳过此步骤！！！")
+                break
+
+            # 步长惩罚
+            reward -= 10
+
             return_all = return_all + reward  # 总奖励为当前奖励加上之前的总奖励
             steps += 1  # 步数加1
-            
-            # 添加奖励和步数记录
+
+            # 添加奖励和步数记录（记录我们重新计算的 reward）
             log_writer_catch.add_reward(reward)
             log_writer_catch.add_return(return_all)
             log_writer_catch.add_step(steps)
@@ -222,27 +363,31 @@ def SAC_episoid(model_path=None):
             next_obs_img, next_obs_tensor = env.get_img(steps, imgs)  # 获取下一个图像和图像张量
             next_obs = [next_obs_img, next_state]
             # print('获取下一个状态更新完毕')
-            # 可以修改reward值让其训练速度加快
-            if good == 1:  # 如果good为1
+            # 只跳过环境明显不稳定的前几步样本，其余与 PPO 一样全部存储
+            should_store = True
+            if done == 1 and steps <= 2 and success_flag1 != 1:
+                should_store = False
+                print(f"  跳过无效样本：done={done}, steps={steps}, success={success_flag1}")
+
+            if should_store:
                 # 将当前状态、动作、奖励、下一个状态、是否完成、是否达到目标添加到经验回放缓存中
-                # 为SAC准备连续动作空间
-                rpm.append((obs_img, robot_state, continuous_action, reward, next_obs_img, next_state, done))  
+                # 为SAC准备连续动作空间（使用连续动作，而不是离散 a）
+                rpm.append((obs_img, robot_state, continuous_action, reward, next_obs_img, next_state, done))
             robot_state = env.get_robot_state()  # 获取机器人状态
             obs_tensor = next_obs_tensor  # 更新图像张量
             if len(rpm) < 5000:  # 如果经验回放缓存小于5000
                 episode_num = 0  # 计数器为0
             if len(rpm) > 5000 and done == 1:  # 只有在buffer中存满了数据才会学习
-                if goal == 1:  # 如果达到目标
-                    print("goal = 1")
-                    # 保存SAC模型的所有组件
-                    save_path = path_list['model_path_catch_SAC'] + '/sac_model_%s.ckpt' % i
-                    checkpoint = {
-                        'policy_net': sac.policy_net.state_dict(),
-                        'q_net': sac.q_net.state_dict(),
-                        'target_q_net': sac.target_q_net.state_dict(),
-                        'log_alpha': sac.log_alpha
-                    }
-                    torch.save(checkpoint, save_path)
+                # if goal == 1:  # 如果达到目标，额外保存一份普通 checkpoint
+                #     print("goal = 1")
+                #     save_path = path_list['model_path_catch_SAC'] + '/sac_model_%s.ckpt' % i
+                #     checkpoint = {
+                #         'policy_net': sac.policy_net.state_dict(),
+                #         'q_net': sac.q_net.state_dict(),
+                #         'target_q_net': sac.target_q_net.state_dict(),
+                #         'log_alpha': sac.log_alpha
+                #     }
+                #     torch.save(checkpoint, save_path)
                     
                 # SAC学习，进行多次更新
                 q_loss_sum = 0
@@ -266,22 +411,148 @@ def SAC_episoid(model_path=None):
                 
                 print(f"Q损失: {avg_q_loss}, 策略损失: {avg_policy_loss}, Alpha损失: {avg_alpha_loss}")
                 
-                # 每500步保存一次模型
-                if i % 500 == 0:
-                    path = path_list['model_path_catch_SAC'] + '/sac_model_%s.ckpt' % i
-                    checkpoint = {
-                        'policy_net': sac.policy_net.state_dict(),
-                        'q_net': sac.q_net.state_dict(),
-                        'target_q_net': sac.target_q_net.state_dict(),
-                        'log_alpha': sac.log_alpha
-                    }
-                    torch.save(checkpoint, path)
-                    print(f"保存模型: {path}")
+                # 每500步保存一次模型（普通 checkpoint）
+                # if i % 500 == 0:
+                #     path = path_list['model_path_catch_SAC'] + '/sac_model_%s.ckpt' % i
+                #     checkpoint = {
+                #         'policy_net': sac.policy_net.state_dict(),
+                #         'q_net': sac.q_net.state_dict(),
+                #         'target_q_net': sac.target_q_net.state_dict(),
+                #         'log_alpha': sac.log_alpha
+                #     }
+                #     torch.save(checkpoint, path)
+                #     print(f"保存模型: {path}")
                 
                 # 写入总奖励
                 log_writer_catch.add_return(return_all)
                 # 写入目标
                 log_writer_catch.add_goal(goal)
+
+                # --- 准备通用 checkpoint 数据，用于测试评估和排行榜 ---
+                base_checkpoint_data = {
+                    'policy_net': sac.policy_net.state_dict(),
+                    'q_net': sac.q_net.state_dict(),
+                    'target_q_net': sac.target_q_net.state_dict(),
+                    'log_alpha': sac.log_alpha,
+                    'episode': i
+                }
+
+                # --- 检查是否到达评估检查点 ---
+                is_checkpoint_interval = (i % CHECKPOINT_INTERVAL == 0) and (i != 0)
+                if is_checkpoint_interval:
+                    print(f"\n--- SAC 周期 {i}: 到达检查点，开始在当前环境进行模型测试 (共 {NUM_TEST_EPISODES} 轮有效) ---")
+                    sac.policy_net.eval()
+
+                    successful_test_episodes = 0
+                    valid_test_cnt = 0           # 已经跑完的有效轮次
+                    total_test_cnt = 0           # 总共开启的轮次（含无效）
+                    max_steps_per_test_episode = 500
+
+                    while valid_test_cnt < NUM_TEST_EPISODES:
+                        total_test_cnt += 1
+                        print(f"———— SAC 测试轮次 {valid_test_cnt + 1}/{NUM_TEST_EPISODES} (总开启 {total_test_cnt}) ————")
+
+                        # 1. 初始化，确保传感器稳定
+                        is_test_valid = False
+                        for init_try in range(MAX_TEST_ATTEMPTS):
+                            env.reset()
+                            env.wait(200)
+                            if wait_for_sensors_stable(env, max_retries=40, wait_ms=200):
+                                is_test_valid = True
+                                break
+                            print(f"  警告: 传感器不稳定，尝试重置... ({init_try + 1}/{MAX_TEST_ATTEMPTS})")
+
+                        if not is_test_valid:
+                            print("  ❌ 初始化失败，此轮不计入有效统计。")
+                            continue
+
+                        # 2. 跑一个测试 episode（纯评估模式，关闭探索）
+                        test_steps, test_done = 0, False
+                        test_imgs = []
+                        while not test_done and test_steps < max_steps_per_test_episode:
+                            test_obs_img, test_obs_tensor = env.get_img(test_steps, test_imgs)
+                            test_robot_state = env.get_robot_state()
+                            if len(test_robot_state) < 6:
+                                print("  测试警告：robot_state 长度不足，提前结束本轮。")
+                                break
+
+                            test_sac_state = [test_robot_state[1], test_robot_state[0], test_robot_state[5], test_robot_state[4]]
+                            test_obs = [test_obs_img, test_sac_state]
+
+                            with torch.no_grad():
+                                continuous_action_t = sac.choose_action(
+                                    episode_num=i,
+                                    obs=test_obs,
+                                    x_graph=test_robot_state,
+                                    evaluate=True
+                                )
+
+                            if isinstance(continuous_action_t, np.ndarray):
+                                action_shoulder_t = float(continuous_action_t[0])
+                                action_arm_t = float(continuous_action_t[1]) if continuous_action_t.shape[0] > 1 else float(continuous_action_t[0])
+                            else:
+                                action_shoulder_t = float(continuous_action_t)
+                                action_arm_t = float(continuous_action_t)
+
+                            action_shoulder_t = np.clip(action_shoulder_t, -0.5, 0.5)
+                            action_arm_t = np.clip(action_arm_t, -0.5, 0.5)
+
+                            test_gps1, test_gps2, test_gps3, test_gps4, _ = env.print_gps()
+                            if len(test_gps1) < 3:
+                                test_steps += 1
+                                continue
+
+                            test_catch_flag = 1.0 if test_steps >= 19 else 0.0
+                            _, _, test_done_from_env, _, test_goal_from_env, _ = env.step(
+                                test_robot_state,
+                                action_shoulder_t,
+                                action_arm_t,
+                                test_steps,
+                                test_catch_flag,
+                                test_gps1, test_gps2, test_gps3, test_gps4,
+                                f"sac_test_img_{test_steps}.png"
+                            )
+                            if test_done_from_env or test_goal_from_env:
+                                test_done = True
+                            test_steps += 1
+
+                        # 3. 判定结果（与 PPO 判定逻辑保持一致）
+                        final_touch = env.darwin.get_touch_sensor_value('grasp_L1_2')
+                        early_fail = (test_steps <= 2 and final_touch != 1)
+                        gps1_final, _, _, _, _ = env.print_gps()
+                        if len(gps1_final) < 3:
+                            print(f"警告：gps1长度不足 ({len(gps1_final)} < 3)，使用默认值")
+                            dx = 0.0
+                            dy = 0.0
+                        else:
+                            dx = gps_goal[0] - gps1_final[1]
+                            dy = gps_goal[1] - gps1_final[2]
+                        current_distance_final = (dx ** 2 + dy ** 2) ** 0.5
+
+                        if early_fail:
+                            print("  ❌ 过早结束且未成功，此轮无效。")
+                            continue
+                        elif (final_touch == 1 or test_goal_from_env) and current_distance_final <= 0.04:
+                            successful_test_episodes += 1
+                            print("  ✓ 测试成功！")
+                        else:
+                            print("  ✗ 测试失败。")
+
+                        valid_test_cnt += 1
+
+                    sac.policy_net.train()
+
+                    test_success_rate = successful_test_episodes
+                    log_writer_catch.add(success_rate=test_success_rate)
+                    print(f"\n--- SAC 测试完成：{NUM_TEST_EPISODES} 轮测试成功率为 {test_success_rate:.2f}% ---")
+
+                    model_ranking.add_and_manage(
+                        new_score=test_success_rate,
+                        new_checkpoint=base_checkpoint_data,
+                        episode_id=i,
+                        base_dir=path_list['model_path_catch_SAC']
+                    )
+                    model_ranking.print_current_rankings()
                 
             success_flag1 = env.darwin.get_touch_sensor_value('grasp_L1_2')
 

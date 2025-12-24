@@ -6,6 +6,7 @@ import math
 from python_scripts.Project_config import path_list, gps_goal, gps_goal1, device
 from python_scripts.SAC.SAC_SACnet_2 import SAC2
 from python_scripts.DQN_Log_write import Log_write
+from python_scripts.Webots_interfaces import Environment
 
 def SAC_tai_episoid(sac2=None, existing_env=None, total_episoid=0, episode=0, rpm_2=None, log_writer_tai=None, log_file_latest_tai=None):
     """
@@ -53,21 +54,34 @@ def SAC_tai_episoid(sac2=None, existing_env=None, total_episoid=0, episode=0, rp
     while True:
         obs_img, obs_tensor = env.get_img(steps, imgs)
         robot_state = env.get_robot_state()
-        # 选择动作
-        action = sac2.choose_action(episode_num=episode, robot_state=robot_state)
+        # 选择连续动作向量（长度 act_dim，前3维用于腿部三个关节）
+        continuous_action = sac2.choose_action(episode_num=episode, robot_state=robot_state)
         
-        print(f'第{episode}周期抬腿训练，第{steps}步，动作a: {action}')
+        print(f'第{episode}周期抬腿训练，第{steps}步，连续动作: {continuous_action}')
         
-        # 记录动作
-        log_writer_tai.add_action(action)
+        # 记录动作（可以只记录前三维或整个向量，这里先记录完整向量）
+        log_writer_tai.add_action(continuous_action)
         # 获取GPS数据
         gps_values = env.print_gps()
         # 设置抓取器状态
         catch_flag = 0.0
 
-        # 执行动作
+        # 取连续动作的前三个维度作为大腿、下腿和踝关节的控制量
+        # 若维度不足，做安全回退
+        if isinstance(continuous_action, np.ndarray) and continuous_action.shape[0] >= 3:
+            action_leg_upper = float(continuous_action[0])
+            action_leg_lower = float(continuous_action[1])
+            action_ankle     = float(continuous_action[2])
+        else:
+            # 回退：全部用同一个标量动作
+            a_val = float(continuous_action[0]) if isinstance(continuous_action, (list, np.ndarray)) else float(continuous_action)
+            action_leg_upper = a_val
+            action_leg_lower = a_val
+            action_ankle     = a_val
+
+        # 执行动作（接口与 PPO_tai_episoid 中保持一致）
         next_state, reward, done, good, goal, count = env.step2(
-            robot_state, action, steps, catch_flag, 
+            robot_state, action_leg_upper, action_leg_lower, action_ankle, steps, catch_flag, 
             gps_values[4], gps_values[0], gps_values[1], gps_values[2], gps_values[3],
         )
 
@@ -88,12 +102,12 @@ def SAC_tai_episoid(sac2=None, existing_env=None, total_episoid=0, episode=0, rp
             
         return_all += reward
         steps += 1
-        # 获取新的观察
-        next_obs_img, next_obs_tensor = env.get_img(steps, obs_img)
+        # 获取新的观察（第二个参数应为图像列表 imgs，与其他代码保持一致）
+        next_obs_img, next_obs_tensor = env.get_img(steps, imgs)
         
-        # 存储经验
+        # 存储经验（使用连续动作向量）
         if good == 1:
-            rpm_2.append(robot_state, action, reward, next_state, done)
+            rpm_2.append(robot_state, continuous_action, reward, next_state, done)
             
         # 更新状态
         robot_state = env.get_robot_state()
@@ -114,7 +128,7 @@ def SAC_tai_episoid(sac2=None, existing_env=None, total_episoid=0, episode=0, rp
                 'log_alpha': sac2.log_alpha
             }
             torch.save(checkpoint, save_path)
-        # 学习过程
+        # 学习过程：缓冲区足够且回合结束时进行学习，是否保存模型仍由 goal 决定
         if len(rpm_2) > 2000 and done == 1:
             # 如果达到目标，保存模型
             if goal == 1:
@@ -126,13 +140,12 @@ def SAC_tai_episoid(sac2=None, existing_env=None, total_episoid=0, episode=0, rp
                     'log_alpha': sac2.log_alpha
                 }
                 torch.save(checkpoint, save_path)
-                
-                # 学习
-                loss = sac2.learn(rpm_2)
-                
-                # 记录损失值
-                log_writer_tai.add(loss=loss)
-                
+
+            # 学习（无论是否成功都根据reward更新策略）
+            loss = sac2.learn(rpm_2)
+            # 记录损失值
+            log_writer_tai.add(loss=loss)
+
             # 记录结果
             log_writer_tai.add(return_all=return_all)
             log_writer_tai.add(goal=goal)

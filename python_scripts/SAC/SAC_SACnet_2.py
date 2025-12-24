@@ -99,7 +99,7 @@ class QNet2(nn.Module):
 class SAC2(object):
     def __init__(self):
         self.state_dim = 20
-        self.act_dim = 6
+        self.act_dim = 6  # 连续动作维度，前3维用于控制：LegUpper, LegLower, Ankle
         
         # 初始化网络
         self.policy_net = PolicyNet2(self.state_dim, self.act_dim).to(device)
@@ -123,50 +123,30 @@ class SAC2(object):
         self.learn_step_counter = 0
     
     def choose_action(self, episode_num, robot_state, evaluate=False):
+        """
+        返回连续动作向量（长度 act_dim），前 3 维分别用于：大腿、下腿、踝关节。
+        训练模式：从高斯策略中采样；评估模式：用均值。
+        """
         with torch.no_grad():
             if evaluate:  # 评估模式，使用策略的均值
                 mean, _ = self.policy_net.forward(robot_state)
                 action = torch.tanh(mean).cpu().numpy()
-                # 将连续动作映射为离散动作（兼容原有接口）
-                discrete_action = np.argmax(action)
-                return discrete_action
+                return action
             else:  # 训练模式，从分布中采样
                 action, _ = self.policy_net.sample(robot_state)
                 action = action.cpu().numpy()
-                # 将连续动作映射为离散动作（兼容原有接口）
-                discrete_action = np.argmax(action)
-                return discrete_action
+                return action
     
     def learn(self, rpm):
         # 从经验回放中采样
         b_s, b_a, b_r, b_s_, done = rpm.sample(BATCH_SIZE)
         
-        batch_states = []
-        batch_next_states = []
-        batch_actions = []
-        batch_rewards = []
-        batch_dones = []
-        
-        for i in range(BATCH_SIZE):
-            batch_states.append(b_s[i])
-            batch_next_states.append(b_s_[i])
-            
-            # 将离散动作转换为独热编码形式的连续动作向量
-            action_one_hot = np.zeros(self.act_dim)
-            action_idx = int(b_a[i])
-            if 0 <= action_idx < self.act_dim:  # 防止索引越界
-                action_one_hot[action_idx] = 1.0
-            
-            batch_actions.append(torch.FloatTensor(action_one_hot).to(device))
-            batch_rewards.append(torch.FloatTensor([b_r[i]]).to(device))
-            batch_dones.append(torch.FloatTensor([done[i]]).to(device))
-        
-        # 转换为批量tensor
-        batch_states = torch.FloatTensor(np.array(batch_states)).to(device)
-        batch_next_states = torch.FloatTensor(np.array(batch_next_states)).to(device)
-        batch_actions = torch.stack(batch_actions).to(device)
-        batch_rewards = torch.stack(batch_rewards).to(device)
-        batch_dones = torch.stack(batch_dones).to(device)
+        # 直接使用连续动作，不再做 one-hot 编码
+        batch_states = torch.FloatTensor(np.array(b_s)).to(device)
+        batch_next_states = torch.FloatTensor(np.array(b_s_)).to(device)
+        batch_actions = torch.FloatTensor(np.array(b_a)).to(device)
+        batch_rewards = torch.FloatTensor(b_r).unsqueeze(-1).to(device)
+        batch_dones = torch.FloatTensor(done).unsqueeze(-1).to(device)
         
         # 计算目标Q值
         with torch.no_grad():

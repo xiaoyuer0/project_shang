@@ -4,6 +4,7 @@ import numpy as np
 import torch_geometric
 from torch_geometric.data import Data
 from python_scripts.Project_config import device
+from python_scripts.PPO.PPO_PPOnet import LMFModule, SpatioTemporalAttention
 # 超参数
 BATCH_SIZE = 64                                 # 样本数量
 LR_ACTOR = 0.0001                               # 策略网络学习率
@@ -27,6 +28,10 @@ class FeatureExtractor(nn.Module):
         self.fc1 = nn.Linear(in_features=6000, out_features=100)  # 全连接层1
         self.fc2 = nn.Linear(in_features=4, out_features=100)  # 全连接层2
         self.fc3 = nn.Linear(in_features=100, out_features=100)  # 全连接层3
+        # 使用与 PPO 中相同的 LMF 多模态融合模块，将图像特征和状态特征进行低秩融合
+        self.lmf = LMFModule(input_dim1=100, input_dim2=100, hidden_dim=200, rank=5)
+        # tsattenGrasp 时空注意力融合模块（已整合，默认不启用，仅供后续实验切换）
+        self.attention_fusion = SpatioTemporalAttention(x_dim=100, state_dim=100, hidden_dim=200)
         self.fc4 = nn.Linear(in_features=300, out_features=200)  # 全连接层4
         self.conv_graph1 = torch_geometric.nn.GraphSAGE(1, 1000, 2, aggr='add')    # 图卷积层1
         self.conv_graph2 = torch_geometric.nn.GATConv(1000, 1000, aggr='add')  # 图卷积层2
@@ -105,7 +110,20 @@ class FeatureExtractor(nn.Module):
         min_val3 = torch.min(x_graph)  # 最小值
         max_val3 = torch.max(x_graph)  # 最大值
         normalized_x_graph = torch.div(torch.sub(x_graph, min_val3), torch.sub(max_val3, min_val3))  # 归一化 x_graph
-        state_x = torch.cat((normalized_data1, normalized_data2, normalized_x_graph), dim=-1)  # 拼接
+
+        # 使用 LMF 将图像特征和状态特征进行融合（与 PPO_PPOnet 中保持一致，当前默认启用）
+        img_feat = normalized_data1.unsqueeze(0)   # [1, 100]
+        state_feat = normalized_data2.unsqueeze(0) # [1, 100]
+        fused_feat = self.lmf(img_feat, state_feat).squeeze(0)  # [200]
+
+        # === tsattenGrasp 时空注意力融合（已整合，默认注释掉） ===
+        # 如需启用 tsattenGrasp 而非 LMF，请注释掉上面的 LMF 融合代码，
+        # 并取消下面这一行的注释，用注意力模块输出的特征替换 fused_feat：
+        # fused_feat = self.attention_fusion(normalized_data1, normalized_data2)
+        # === 无 LMF 版本：直接拼接图像和状态特征（备用实现） ===
+        # fused_feat = torch.cat((normalized_data1, normalized_data2), dim=-1)
+        # 将融合后的时空/多模态特征与图特征拼接，得到 300 维输入
+        state_x = torch.cat((fused_feat, normalized_x_graph), dim=-1)  # 拼接
         state_x = self.fc4(state_x)  # 全连接层4
         return state_x
 
