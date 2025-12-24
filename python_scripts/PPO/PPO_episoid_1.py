@@ -258,7 +258,8 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
     episode_num = episode_start  # 初始化回合计数器
     env = Environment()
     success_catch = 0                  # 抓取成功次数
-    
+    learn_counter = 0                  # 学习计数器：每10个episode学习一次
+    LEARN_INTERVAL = 10                # 每10个episode学习一次
 
     for i in range(episode_start, episode_start + 10000):  # 从episode_start开始，最多再训练50000个周期
         log_writer_catch.add(episode_num=i)
@@ -374,7 +375,7 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
             # 距离变化奖励（鼓励靠近目标）
             success_flag1 = env.darwin.get_touch_sensor_value('grasp_L1_2')
             if prev_distance is not None:
-                reward = (prev_distance - current_distance) * 10.0  # 放大系数可调
+                reward = (prev_distance - current_distance) * 5.0  # 放大系数可调
             else:
                 reward = -current_distance  # 初始奖励
 
@@ -400,7 +401,7 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
             if success_flag1 == 1:                       # 抓到了
     # 用你前面算好的 current_distance 即可
                 if current_distance <= 0.04:             # 4 cm 容忍
-                    reward += 200                              
+                    reward += 300                              
                     print("✅ 抓到目标梯级，发放大奖励！")
                 else:                            
                     reward -= 160                         # 抓错梯子，无大奖励
@@ -414,7 +415,7 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
             if done == 1 and steps <= 2 and success_flag1 != 1:
                 print("因环境不稳定导致无效数据，跳过此步骤！！！")
                 break
-            reward -= steps * 0.5
+            reward -= 10
             return_all = return_all + reward  # 总奖励为当前奖励加上之前的总奖励
             
             steps += 1  # 步数加1
@@ -487,16 +488,27 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
                 # 问题：如果环境返回的goal=1但实际抓错了，我们需要确保reward是大惩罚
                 # 解决方案：在episode结束时，根据实际抓取结果重新计算reward，完全忽略goal标志
                 
-                # 1. 调用learn()进行模型更新
-                print("\n--- Episode 结束，开始学习 ---")
-                loss_shoulder = ppo_shoulder.learn()
-                #print("22222222222222222222222222222222222222222-305")
-                loss_arm = ppo_arm.learn()
-                loss = loss_shoulder + loss_arm   
-                print('loss_arm:', loss_arm)
-                print('loss_shoulder:', loss_shoulder)
-                print('loss:', loss)
-                log_writer_catch.add(loss=loss)
+                # 1. 每10个episode才调用learn()进行模型更新
+                learn_counter += 1
+                if learn_counter >= LEARN_INTERVAL:
+                    print(f"\n--- Episode {i} 结束，已累积 {learn_counter} 个episode，开始学习 ---")
+                    # 【优化】检查是否有数据可学习（避免空数据学习）
+                    if len(ppo_shoulder.rewards) == 0 or len(ppo_arm.rewards) == 0:
+                        print(f"  警告：Episode {i} 没有数据可学习（可能所有样本都被跳过），跳过本次学习")
+                        loss = 0.0
+                    else:
+                        loss_shoulder = ppo_shoulder.learn()
+                        loss_arm = ppo_arm.learn()
+                        loss = loss_shoulder + loss_arm   
+                        print('loss_arm:', loss_arm)
+                        print('loss_shoulder:', loss_shoulder)
+                        print('loss:', loss)
+                    log_writer_catch.add(loss=loss)
+                    learn_counter = 0  # 重置计数器，再等10个episode
+                else:
+                    print(f"--- Episode {i} 结束，累积中... ({learn_counter}/{LEARN_INTERVAL} episodes) ---")
+                    loss = 0.0  # 未学习时loss为0
+                    log_writer_catch.add(loss=loss)
 
                 # 2. 准备好通用的 checkpoint 数据，避免重复写
                 base_checkpoint_data = {
@@ -582,11 +594,20 @@ def PPO_episoid_1(model_path=None, max_steps_per_episode=500):
                         # -------- 3. 判定结果 --------
                         final_touch = env.darwin.get_touch_sensor_value('grasp_L1_2')
                         early_fail  = (test_steps <= 2 and final_touch != 1)
-
+                        gps1, _, _, _, _ = env.print_gps()
+                        # 安全检查：确保gps1有足够的元素
+                        if len(gps1) < 3:
+                            print(f"警告：gps1长度不足 ({len(gps1)} < 3)，使用默认值")
+                            dx = 0.0
+                            dy = 0.0
+                        else:
+                            dx = gps_goal[0] - gps1[1]
+                            dy = gps_goal[1] - gps1[2]
+                        current_distance = (dx**2 + dy**2)**0.5
                         if early_fail:
                             print(f"  ❌ 过早结束且未成功，此轮无效。")
                             continue
-                        elif final_touch == 1 or test_goal_from_env:
+                        elif (final_touch == 1 or test_goal_from_env) and current_distance <= 0.04:
                             successful_test_episodes += 1
                             print(f"  ✓ 测试成功！")
                         else:

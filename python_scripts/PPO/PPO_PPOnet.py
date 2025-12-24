@@ -2,6 +2,7 @@ from collections import deque
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import torch_geometric
 from torch_geometric.data import Data
@@ -49,6 +50,35 @@ class LMFModule(nn.Module):
         return fused
 
 
+class SpatioTemporalAttention(nn.Module):
+    """
+    来自 tsattenGrasp 的时空注意力融合模块：
+    - 用注意力权重融合 CNN 特征与状态特征
+    - 这里保留实现，方便在 PPO 中随时启用
+    """
+    def __init__(self, x_dim, state_dim, hidden_dim=200):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.query = nn.Linear(x_dim, hidden_dim)
+        self.key = nn.Linear(state_dim, hidden_dim)
+        self.value = nn.Linear(state_dim, hidden_dim)
+        self.proj = nn.Linear(hidden_dim + x_dim, hidden_dim)
+
+    def forward(self, x, state):
+        # x/state 均为 [feature_dim]，扩展 batch 维度以复用 tsattenGrasp 逻辑
+        q = self.query(x.unsqueeze(0))
+        k = self.key(state.unsqueeze(0))
+        v = self.value(state.unsqueeze(0))
+
+        scale = torch.sqrt(torch.tensor(self.hidden_dim, dtype=torch.float32, device=x.device))
+        scores = torch.matmul(q, k.transpose(0, 1)) / scale
+        attention_weights = F.softmax(scores, dim=-1)
+        attended_values = torch.matmul(attention_weights, v)
+
+        combined = torch.cat([x, attended_values.squeeze(0)], dim=-1)
+        return self.proj(combined)
+
+
 class ActorCritic(nn.Module):
     def __init__(self, act_dim, node_num):
         super().__init__()
@@ -69,6 +99,9 @@ class ActorCritic(nn.Module):
         # 图像特征 + 状态特征 的 LMF 多模态融合模块
         # 与 lmfGrasp 中保持相同配置：100 + 100 -> 200
         self.lmf = LMFModule(input_dim1=100, input_dim2=100, hidden_dim=200, rank=5)
+
+        # tsattenGrasp 时空注意力融合模块（调用在 forward 中默认注释）
+        self.attention_fusion = SpatioTemporalAttention(x_dim=100, state_dim=100, hidden_dim=200)
         
         # 图神经网络部分
         self.conv_graph1 = torch_geometric.nn.GraphSAGE(1, 1000, 2, aggr='add')
@@ -92,9 +125,10 @@ class ActorCritic(nn.Module):
         
         # 将log_sigma作为可学习的参数，而不是依赖于状态。这是一种常见且稳定的做法。
         # act_dim 应该是动作的维度，这里是1
-        # 【修复】降低初始探索噪声：从0（对应sigma=1.0）改为-1.0（对应sigma≈0.37）
-        # 这样可以减少过度探索，让网络更快收敛到好的策略
-        self.actor_log_sigma = nn.Parameter(torch.tensor([-1.0]))  # 初始sigma ≈ 0.37，而不是1.0
+        # 【修复】提高初始探索噪声：从-1.0（对应sigma≈0.37）改为-0.5（对应sigma≈0.61）
+        # 问题：之前sigma太小导致探索不足，网络过早收敛到次优策略
+        # 解决方案：增加初始探索率，让网络有更多机会探索好的策略
+        self.actor_log_sigma = nn.Parameter(torch.tensor([-0.5]))  # 初始sigma ≈ 0.61，增加探索
         
         # Critic头：输出状态值
         self.critic = nn.Linear(200, 1)
@@ -169,10 +203,17 @@ class ActorCritic(nn.Module):
         max_val3 = torch.max(x_graph)
         normalized_x_graph = torch.div(torch.sub(x_graph, min_val3), torch.sub(max_val3, min_val3))
 
-        # 使用 LMF 融合图像特征和状态特征
+        # 使用 LMF 融合图像特征和状态特征（默认启用）
         img_feat = normalized_data1.unsqueeze(0)   # [1, 100]
         state_feat = normalized_data2.unsqueeze(0) # [1, 100]
         fused_feat = self.lmf(img_feat, state_feat).squeeze(0)  # [200]
+
+        # === tsattenGrasp 时空注意力融合（功能已合入，默认注释掉） ===
+        # 启用方法：注释掉上面的 LMF fused_feat 行，并取消下方一行的注释
+        # fused_feat = self.attention_fusion(normalized_data1, normalized_data2)
+
+        # === 无 LMF 版本：直接拼接图像和状态特征（备用实现） ===
+        # fused_feat = torch.cat((normalized_data1, normalized_data2), dim=-1)
 
         # 再与图特征拼接，得到最终 300 维特征
         state_x = torch.cat((fused_feat, normalized_x_graph), dim=-1)
@@ -205,7 +246,10 @@ class PPO:
         self.clip_ratio = 0.1  # PPO裁剪参数
         self.value_coef = 0.01  # 【修复】大幅降低值函数损失系数，让reward对loss的影响更大（从0.1降低到0.01，目标：Reward=-90时loss≈7~9）
         self.entropy_coef = 0.01  # 【优化】降低熵系数，减少探索，提高收敛稳定性（从0.1降低到0.01）
-        self.policy_loss_scale = 0.1  # 【新增】policy_loss缩放因子，控制loss大小（目标：Reward=-90时loss≈7~9）
+        # 【修复】提高policy_loss缩放因子，增强学习信号
+        # 问题：0.1太小，导致学习信号太弱，网络学不到好的策略
+        # 解决方案：提高到0.5，让网络对reward变化更敏感
+        self.policy_loss_scale = 0.5  # 从0.1提高到0.5，增强学习信号
         self.max_grad_norm = 1.0  # 梯度裁剪阈值
 
         # 学习率和优化器参数
@@ -215,10 +259,6 @@ class PPO:
         # PPO更新参数
         self.update_epochs = 8  # 【优化】增加更新次数，提高学习稳定性（从4增加到8）
         self.batch_size = 64  # 批大小
-        # 【新增】保留最近若干个 episode 进行学习（这里设为最近10个）
-        # 注意：仍然是 on-policy，只是把最近几轮的数据一起打包成更大的 batch
-        self.max_episode_buffer = 10
-        self.episode_buffer = deque(maxlen=self.max_episode_buffer)
 
         # 初始化策略网络
         self.policy = ActorCritic(act_dim=self.act_dim, node_num=self.node_num).to(device)
@@ -238,6 +278,22 @@ class PPO:
         self.values = []           # 合并存储价值
         self.log_probs = []       # 合并存储对数概率
         self.dones = []
+        
+        # 【新增】自适应探索率调整：记录学习历史
+        self.learning_history = {
+            'losses': deque(maxlen=20),           # 最近20个episode的总loss
+            'policy_losses': deque(maxlen=20),    # 最近20个episode的policy_loss
+            'rewards': deque(maxlen=20),          # 最近20个episode的累计reward
+            'reward_sums': deque(maxlen=20),      # 最近20个episode的reward总和
+        }
+        # 探索率调整参数
+        # 【修复】调整探索率范围，保持足够的探索能力
+        self.sigma_adjustment_rate = 0.02  # 每次调整的幅度（2%，更保守）
+        self.sigma_min = 0.2   # 【修复】提高最小sigma从0.15到0.2，避免过早收敛（log_sigma ≈ -1.61）
+        self.sigma_max = 0.8   # 【修复】提高最大sigma从0.5到0.8，允许更多探索（log_sigma ≈ -0.22）
+        self.min_episodes_before_adjust = 20  # 至少20个episode后才开始调整
+        self.adjust_interval = 3  # 每3个episode调整一次，避免过于频繁
+        self.last_adjust_episode = 0  # 记录上次调整的episode
     
     def choose_action(self, episode_num, obs, x_graph, explore=None):
         if isinstance(obs, tuple):
@@ -247,10 +303,22 @@ class PPO:
             x = obs
             state = x_graph
 
+        # 【修复】确保所有输入都移到正确的设备
         if isinstance(x, torch.Tensor):
             x = x.to(device)
+        else:
+            x = torch.as_tensor(x, dtype=torch.float32).to(device)
+        
+        # 【修复】确保 state 也在正确的设备上
+        if isinstance(state, torch.Tensor):
+            state = state.to(device)
+        else:
+            state = torch.as_tensor(state, dtype=torch.float32).to(device)
 
-        epsilon = max(0.1, 0.90 - episode_num * 0.0001)
+        # 【修复】加快epsilon衰减，让网络更快从随机探索转向策略利用
+        # 原来：max(0.1, 0.90 - episode_num * 0.0001) - 衰减太慢，1000个episode后还是0.8
+        # 现在：max(0.05, 0.90 - episode_num * 0.001) - 1000个episode后降到0.05
+        epsilon = max(0.05, 0.90 - episode_num * 0.001)
         if explore is not None:
             use_random = explore
         else:
@@ -370,11 +438,13 @@ class PPO:
         advantages = advantages - advantages_mean  # 只中心化，不标准化
         
         # 【新增】如果优势函数方差太大，适度缩放（但不完全标准化），保留更多reward信息
-        # 【修复】提高缩放阈值，让advantages保持更大的数值，使loss对reward更敏感（目标：Reward=-90时loss≈7~9）
+        # 【修复】降低缩放阈值，更早进行缩放，避免优势函数过大导致梯度爆炸
+        # 问题：如果advantages太大，可能导致梯度不稳定，网络学习失败
+        # 解决方案：降低阈值到100.0，更早进行缩放，保持学习稳定性
         advantages_std = advantages.std()
-        if advantages_std > 200.0:  # 【修复】提高阈值从50.0到200.0，保留更多reward信息
-            # 缩放因子：将标准差压缩到200以内，但保留相对大小
-            scale_factor = 200.0 / (advantages_std + 1e-8)
+        if advantages_std > 100.0:  # 【修复】降低阈值从200.0到100.0，更早缩放保持稳定
+            # 缩放因子：将标准差压缩到100以内，但保留相对大小
+            scale_factor = 100.0 / (advantages_std + 1e-8)
             advantages = advantages * scale_factor
             print(f"  【优势函数缩放】原始std={advantages_std:.2f}, 缩放因子={scale_factor:.4f}, 缩放后std={advantages.std():.2f}")
         
@@ -390,44 +460,133 @@ class PPO:
 
     def get_current_sigma(self):
         return torch.exp(self.policy.actor_log_sigma).item()
+    
+    def _adjust_exploration_rate(self, episode_num):
+        """
+        根据学习情况自适应调整探索率（sigma）
+        改进策略：
+        1. 更保守的调整：减小调整幅度，增加调整间隔
+        2. 更严格的降低条件：需要return为正且稳定上升
+        3. 更积极的增加条件：如果return为负或波动大，立即增加探索率
+        4. 训练阶段保护：早期保持高探索率
+        """
+        # 检查是否满足调整条件
+        if len(self.learning_history['losses']) < 10:  # 需要至少10个episode的数据
+            return
+        
+        # 检查调整间隔
+        if episode_num - self.last_adjust_episode < self.adjust_interval:
+            return
+        
+        # 早期训练阶段保护：前N个episode保持高探索率
+        if episode_num < self.min_episodes_before_adjust:
+            return
+        
+        losses = list(self.learning_history['losses'])
+        policy_losses = list(self.learning_history['policy_losses'])
+        rewards = list(self.learning_history['reward_sums'])
+        
+        # 计算最近10个episode的趋势（使用更多数据更稳定）
+        recent_losses = losses[-10:]
+        recent_policy_losses = policy_losses[-10:]
+        recent_rewards = rewards[-10:]
+        
+        # 1. 分析loss趋势
+        loss_trend = (recent_losses[-1] - recent_losses[0]) / max(abs(recent_losses[0]), 1e-6)
+        # 2. 分析reward趋势和绝对值
+        reward_mean = sum(recent_rewards) / len(recent_rewards)
+        reward_std = (sum((x - reward_mean)**2 for x in recent_rewards) / len(recent_rewards))**0.5
+        reward_trend = (recent_rewards[-1] - recent_rewards[0]) / max(abs(recent_rewards[0]), 1e-6) if recent_rewards[0] != 0 else 0
+        # 3. 分析policy_loss的平均值和稳定性
+        policy_loss_mean = sum(recent_policy_losses) / len(recent_policy_losses)
+        policy_loss_std = (sum((x - policy_loss_mean)**2 for x in recent_policy_losses) / len(recent_policy_losses))**0.5
+        
+        # 获取当前的sigma
+        current_log_sigma = self.policy.actor_log_sigma.item()
+        current_sigma = torch.exp(self.policy.actor_log_sigma).item()
+        
+        # 决策：是否应该调整探索率
+        should_decrease = False  # 是否应该降低探索率
+        should_increase = False  # 是否应该增加探索率
+        reason = ""
+        
+        # 【优先】情况1：如果return为负或波动很大，增加探索率
+        if reward_mean < 0 or reward_std > 100:
+            should_increase = True
+            reason = f"return为负({reward_mean:.2f})或波动大(std={reward_std:.2f})，需要更多探索"
+        
+        # 情况2：如果return持续为正且稳定上升，可以考虑降低探索率
+        elif reward_mean > 50 and reward_trend > 0.1 and reward_std < 50:
+            # 进一步检查：loss是否也在下降
+            if loss_trend < -0.05:
+                should_decrease = True
+                reason = f"return为正且稳定上升(mean={reward_mean:.2f}, trend={reward_trend:.2%})，loss下降"
+        
+        # 情况3：loss持续下降且reward上升（更严格的条件）
+        elif loss_trend < -0.15 and reward_trend > 0.15 and reward_mean > 0:
+            should_decrease = True
+            reason = f"loss大幅下降({loss_trend:.2%})且reward大幅上升({reward_trend:.2%})"
+        
+        # 情况4：loss上升或reward下降，增加探索率
+        elif loss_trend > 0.15 or (reward_trend < -0.15 and reward_mean < 0):
+            should_increase = True
+            reason = f"loss上升({loss_trend:.2%})或reward下降({reward_trend:.2%})"
+        
+        # 情况5：policy_loss很小且稳定，且return为正（更严格的条件）
+        elif policy_loss_mean < 0.3 and policy_loss_std < 0.15 and reward_mean > 30:
+            should_decrease = True
+            reason = f"policy_loss很小且稳定(mean={policy_loss_mean:.3f}, std={policy_loss_std:.3f})，return为正"
+        
+        # 情况6：policy_loss很大且不稳定，需要更多探索
+        elif policy_loss_mean > 2.5 and policy_loss_std > 1.2:
+            should_increase = True
+            reason = f"policy_loss大且不稳定(mean={policy_loss_mean:.3f}, std={policy_loss_std:.3f})"
+        
+        # 执行调整
+        if should_decrease and current_sigma > self.sigma_min:
+            # 降低探索率：减小sigma（减小log_sigma）
+            new_log_sigma = current_log_sigma - self.sigma_adjustment_rate
+            new_sigma = torch.exp(torch.tensor(new_log_sigma)).item()
+            if new_sigma >= self.sigma_min:
+                # 【修复】确保新 tensor 在正确的设备上
+                self.policy.actor_log_sigma.data = torch.tensor([new_log_sigma], device=self.policy.actor_log_sigma.device)
+                self.last_adjust_episode = episode_num
+                print(f"  【自适应探索率】降低探索率: {reason}, sigma: {current_sigma:.4f} -> {new_sigma:.4f}")
+        
+        elif should_increase and current_sigma < self.sigma_max:
+            # 增加探索率：增大sigma（增大log_sigma）
+            new_log_sigma = current_log_sigma + self.sigma_adjustment_rate
+            new_sigma = torch.exp(torch.tensor(new_log_sigma)).item()
+            if new_sigma <= self.sigma_max:
+                # 【修复】确保新 tensor 在正确的设备上
+                self.policy.actor_log_sigma.data = torch.tensor([new_log_sigma], device=self.policy.actor_log_sigma.device)
+                self.last_adjust_episode = episode_num
+                print(f"  【自适应探索率】增加探索率: {reason}, sigma: {current_sigma:.4f} -> {new_sigma:.4f}")
+    
     def learn(self):
         """
-        根据指定的动作类型（'shoulder' 或 'arm'）更新策略网络。
-  
-        :param action_type: 一个字符串，'shoulder' 或 'arm'，用于指定要更新哪个动作部分。
+        学习函数：每次调用时学习当前累积的所有episode数据
+        - 调用端已控制每10个episode才调用一次
+        - 直接使用 self.states 等列表中已累积的数据进行学习
         """
-        # 检查传入的参数是否合法
-        #if action_type not in ['shoulder', 'arm']:
-        #    raise ValueError("action_type 必须是 'shoulder' 或 'arm'")
+        # 检查是否有数据
+        if len(self.rewards) == 0:
+            print("  警告：没有数据可学习，返回0")
+            return 0.0
         
-        # 【新增】先把当前 episode 的轨迹打包进缓冲区（最多保留最近10个）
-        episode_data = {
-            "states": list(self.states),
-            "actions": list(self.actions),
-            "actions_raw": list(self.actions_raw),
-            "rewards": list(self.rewards),
-            "next_states": list(self.next_states),
-            "values": list(self.values),
-            "log_probs": list(self.log_probs),
-            "dones": list(self.dones),
-        }
-        self.episode_buffer.append(episode_data)
+        print(f"  【开始学习】使用累积的 {len(self.rewards)} 个样本进行学习")
+        
+        # 直接使用已累积的数据（已包含10个episode的数据）
+        all_states = self.states
+        all_actions = self.actions
+        all_actions_raw = self.actions_raw
+        all_rewards = self.rewards
+        all_next_states = self.next_states
+        all_values = self.values
+        all_log_probs = self.log_probs
+        all_dones = self.dones
 
-        # 将缓冲区内所有 episode 的数据拼接成一个大 batch
-        all_states, all_actions, all_actions_raw = [], [], []
-        all_rewards, all_next_states, all_values = [], [], []
-        all_log_probs, all_dones = [], []
-        for ep in self.episode_buffer:
-            all_states.extend(ep["states"])
-            all_actions.extend(ep["actions"])
-            all_actions_raw.extend(ep["actions_raw"])
-            all_rewards.extend(ep["rewards"])
-            all_next_states.extend(ep["next_states"])
-            all_values.extend(ep["values"])
-            all_log_probs.extend(ep["log_probs"])
-            all_dones.extend(ep["dones"])
-
-        # 计算优势函数和回报（基于最近<=10个 episode 的所有样本）
+        # 计算优势函数和回报
         advantages, returns = self.calculate_advantages(all_rewards, all_values, all_dones)
         if len(advantages) == 0:
             return 0.0
@@ -447,6 +606,8 @@ class PPO:
                 for a in all_actions
             ]
         total_loss = 0
+        total_policy_loss = 0  # 【新增】累计所有batch的policy_loss
+        batch_count = 0  # 【新增】记录batch数量
         for _ in range(self.update_epochs):
             # 生成随机索引
             indices = torch.randperm(len(batch_states))
@@ -531,6 +692,10 @@ class PPO:
 
                 policy_loss = policy_loss / len(batch_x) # 最后再取平均
                 entropy = entropy / len(batch_x) # 最后再取平均
+                
+                # 【新增】累计policy_loss（用于自适应调整）
+                total_policy_loss += policy_loss.item()
+                batch_count += 1
 
                 # 【新增】对policy_loss进行缩放，控制loss大小（目标：Reward=-90时loss≈7~9）
                 # 如果policy_loss太大，缩放它；如果太小，放大它
@@ -562,8 +727,23 @@ class PPO:
 
         # 更新学习率
         self.scheduler.step()
+        
+        # 【新增】记录当前episode的学习指标，用于自适应探索率调整
+        avg_loss = total_loss / self.update_epochs
+        reward_sum = sum(all_rewards) if all_rewards else 0.0
+        policy_loss_avg = total_policy_loss / batch_count if batch_count > 0 else 0.0
+        
+        self.learning_history['losses'].append(avg_loss)
+        self.learning_history['policy_losses'].append(policy_loss_avg)
+        self.learning_history['rewards'].append(reward_sum)
+        self.learning_history['reward_sums'].append(reward_sum)
+        
+        # 【新增】根据学习情况自适应调整探索率
+        # 使用learning_history的长度作为episode编号（因为每个episode都会添加一次数据）
+        episode_num = len(self.learning_history['losses'])
+        self._adjust_exploration_rate(episode_num)
 
-        # 清空轨迹数据
+        # 学习完成，清空轨迹数据，准备下一轮累积
         self.states.clear()
         self.actions.clear()
         self.actions_raw.clear()
@@ -572,8 +752,10 @@ class PPO:
         self.dones.clear()
         self.values.clear()
         self.log_probs.clear()
+        
         # 清理GPU内存
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        print(f"  【学习完成】已清空数据，等待下一轮10个episode...")
         print("total_loss:", total_loss)
         return total_loss / self.update_epochs
